@@ -266,18 +266,51 @@ export default function Home() {
   return (
     <div className="flex min-h-screen flex-col">
       <main className="mx-auto flex w-full max-w-[720px] flex-1 flex-col items-center gap-12 px-6 pb-24 pt-20">
-        <header className="flex flex-col items-center gap-2 text-center">
+        <header className="flex flex-col items-center gap-4 text-center">
           <h1>
-            <Logo className="h-12 w-auto" />
+            <Logo className="h-10 w-auto" />
           </h1>
-          <p className="text-sm text-muted">
-            Speak an interview question. Answer in Klingon.
-          </p>
+          <p className="text-sm text-muted">Interview coaching for Klingons.</p>
+          {/* Mode: makes the capture scope explicit */}
+          <div
+            className="mt-1 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs"
+            role="group"
+            aria-label="Listening mode"
+          >
+            <button
+              type="button"
+              aria-pressed="true"
+              className="rounded-full bg-background px-3.5 py-1 font-medium text-foreground"
+            >
+              Practice
+            </button>
+            <button
+              type="button"
+              disabled
+              title="Meeting mode — capturing meeting audio — is coming soon"
+              className="cursor-not-allowed px-3.5 py-1 text-faint"
+            >
+              Meeting
+            </button>
+          </div>
         </header>
 
         {/* Primary action */}
         <div className="flex flex-col items-center gap-6">
-          <button
+          <div className="relative">
+            <AnimatePresence>
+              {running && (
+                <motion.span
+                  aria-hidden="true"
+                  initial={{ opacity: 0 }}
+                  animate={{ opacity: 1 }}
+                  exit={{ opacity: 0 }}
+                  transition={{ duration: 0.6 }}
+                  className="absolute -inset-8 rounded-full bg-accent/15 blur-2xl"
+                />
+              )}
+            </AnimatePresence>
+            <button
             type="button"
             onClick={toggleRecording}
             disabled={starting}
@@ -289,12 +322,13 @@ export default function Home() {
                 : "border-line bg-surface hover:border-accent/70"
             }`}
           >
-            {running ? (
-              <span className="h-7 w-7 rounded-[6px] bg-background" />
-            ) : (
-              <span className="h-7 w-7 rounded-full bg-accent" />
-            )}
-          </button>
+              {running ? (
+                <span className="h-7 w-7 rounded-[6px] bg-background" />
+              ) : (
+                <span className="h-7 w-7 rounded-full bg-accent" />
+              )}
+            </button>
+          </div>
           <Waveform levels={levels} active={running} />
         </div>
 
@@ -347,14 +381,14 @@ export default function Home() {
                 className="flex flex-col items-center gap-2"
               >
                 <p className="text-sm text-muted">
-                  Press the button and ask an interview question aloud.
+                  Press the button and speak the interviewer&rsquo;s question
+                  aloud.
                 </p>
                 <p className="text-sm text-faint">
                   Try{" "}
                   <span className="text-muted">
-                    &ldquo;Tell me about yourself.&rdquo;
-                  </span>{" "}
-                  — the answer comes back in Klingon.
+                    &ldquo;Where do you see yourself in five years?&rdquo;
+                  </span>
                 </p>
               </motion.div>
             ) : (
@@ -366,14 +400,21 @@ export default function Home() {
                 transition={{ duration: 0.3 }}
               >
                 {hasTranscript ? (
-                  <p className="text-base leading-7 text-muted">
-                    {finals.join(" ")}
-                    {partial && <span className="text-faint"> {partial}</span>}
-                  </p>
+                  <div className="flex flex-col gap-2">
+                    <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-faint">
+                      Question
+                    </span>
+                    <p className="text-base leading-7 text-muted">
+                      {finals.join(" ")}
+                      {partial && (
+                        <span className="text-faint"> {partial}</span>
+                      )}
+                    </p>
+                  </div>
                 ) : (
                   <p className="text-sm text-faint">
                     {running
-                      ? "Listening — ask your question aloud."
+                      ? "Listening — speak the question."
                       : "Connecting to transcription…"}
                   </p>
                 )}
@@ -439,7 +480,7 @@ export default function Home() {
               >
                 <div className="flex flex-col gap-2">
                   <dt className="text-[11px] font-medium uppercase tracking-[0.18em] text-faint">
-                    Klingon
+                    Your answer
                   </dt>
                   <dd className="text-3xl font-semibold leading-tight tracking-tight">
                     {answer.klingon}
@@ -455,7 +496,7 @@ export default function Home() {
                 </div>
                 <div className="flex flex-col gap-2">
                   <dt className="text-[11px] font-medium uppercase tracking-[0.18em] text-faint">
-                    Back-translation
+                    Literal meaning
                   </dt>
                   <dd className="text-sm leading-6 text-muted">
                     {answer.backTranslation}
@@ -463,7 +504,7 @@ export default function Home() {
                 </div>
                 <div className="flex flex-col gap-2 border-t border-line/60 pt-6">
                   <dt className="text-[11px] font-medium uppercase tracking-[0.18em] text-faint">
-                    Suggested answer
+                    Federation Standard
                   </dt>
                   <dd className="text-sm leading-6 text-faint">
                     {answer.english}
@@ -479,7 +520,7 @@ export default function Home() {
                 transition={{ duration: 0.3 }}
                 className="pt-6 text-center text-sm text-faint"
               >
-                Your answer will appear here — Klingon first.
+                Your answer will appear here.
               </motion.p>
             ) : null}
           </AnimatePresence>
@@ -496,7 +537,7 @@ export default function Home() {
                 running ? "bg-accent" : starting ? "bg-muted" : "bg-faint"
               }`}
             />
-            {connectionLabel}
+            Practice · {connectionLabel}
           </span>
           <span className="font-mono tabular-nums">
             {latencyMs !== null ? `${latencyMs} ms` : "— ms"}
