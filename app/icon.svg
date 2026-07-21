@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- Kluely favicon: profile mark from components/Logo.tsx on brand ground -->
+  <rect width="64" height="64" rx="14" fill="#0a0a0b"/>
+  <g transform="translate(11.8 6.5) scale(0.88)">
+    <path fill="#ededef" d="M21 54 C18 50 17 47 17 44 L8 48 C5 42 4 36 6 30 L1 26 C4 20 8 13 14 9 C16 7 19 6 22 6 L24 8 L27 4 L30 9 L33 6 L36 11 L38 16 L37 20 L42 25 L38 28 L45 33 L38 37 L40 40 L36 42 L39 45 L34 47 L36 53 L28 50 Z"/>
+  </g>
+</svg>

@@ -7,12 +7,9 @@ interface LogoProps {
  * extended, wide-tracked wordmark with spear-point terminals — Star Trek
  * titling language, drawn as hand-authored paths.
  *
- * Monochrome-first: the mark and wordmark are currentColor; the accent red
- * appears once, as the earring.
+ * Monochrome: the mark and wordmark are entirely currentColor.
  */
 export default function Logo({ className }: LogoProps) {
-  const accent = "var(--accent, #d6323c)";
-
   return (
     <svg
       viewBox="0 0 316 56"
@@ -53,9 +50,6 @@ export default function Logo({ className }: LogoProps) {
            L28 50
            Z"
       />
-      {/* Earring — the single accent highlight */}
-      <circle cx="25" cy="41" r="2.2" fill={accent} />
-
       {/* ---- Wordmark: KLUELY --------------------------------------------
           Light extended letterforms, cap height 36, stroke 6, wide tracking.
           Spear-point blades on the K arm, L feet, E arms, and Y horns. */}

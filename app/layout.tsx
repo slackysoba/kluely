@@ -21,9 +21,23 @@ const piqad = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Kluely — interview answers in Klingon",
+  metadataBase: new URL(
+    process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"
+  ),
+  title: "Kluely — interview coaching for Klingons",
   description:
-    "Speak an interview question, get a strong answer rendered in Klingon.",
+    "Speak the interviewer's question aloud and answer with honor.",
+  openGraph: {
+    title: "Kluely",
+    description: "Interview coaching for Klingons.",
+    siteName: "Kluely",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Kluely",
+    description: "Interview coaching for Klingons.",
+  },
 };
 
 export default function RootLayout({
