@@ -4,6 +4,7 @@ import { useCallback, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { AudioCapture, MicrophonePermissionError } from "@/lib/audio-capture";
 import { AssemblyAIStream } from "@/lib/assemblyai-stream";
+import Logo from "@/components/Logo";
 
 const WAVE_BARS = 40;
 const FLAT_LEVELS = new Array<number>(WAVE_BARS).fill(0);
@@ -266,7 +267,9 @@ export default function Home() {
     <div className="flex min-h-screen flex-col">
       <main className="mx-auto flex w-full max-w-[720px] flex-1 flex-col items-center gap-12 px-6 pb-24 pt-20">
         <header className="flex flex-col items-center gap-2 text-center">
-          <h1 className="text-lg font-medium tracking-tight">Kluely</h1>
+          <h1>
+            <Logo className="h-12 w-auto" />
+          </h1>
           <p className="text-sm text-muted">
             Speak an interview question. Answer in Klingon.
           </p>
