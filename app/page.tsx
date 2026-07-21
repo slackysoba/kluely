@@ -1,18 +1,25 @@
 "use client";
 
-// Temporary test harness for the audio → AssemblyAI streaming pipeline.
-// Not the real UI — just enough to verify capture, transcription, latency,
-// and the /api/answer round trip.
-
 import { useCallback, useRef, useState } from "react";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { AudioCapture, MicrophonePermissionError } from "@/lib/audio-capture";
 import { AssemblyAIStream } from "@/lib/assemblyai-stream";
+
+const WAVE_BARS = 40;
+const FLAT_LEVELS = new Array<number>(WAVE_BARS).fill(0);
 
 interface AnswerPayload {
   english: string;
   klingon: string;
   pIqaD: string;
   backTranslation: string;
+}
+
+type SessionErrorKind = "mic-denied" | "connection";
+
+interface AnswerError {
+  kind: "network" | "api";
+  question: string;
 }
 
 function isAnswerPayload(data: unknown): data is AnswerPayload {
@@ -28,7 +35,79 @@ function isAnswerPayload(data: unknown): data is AnswerPayload {
   );
 }
 
+/** Perceived loudness of one 16-bit PCM chunk, 0..1. */
+function chunkLevel(chunk: ArrayBuffer): number {
+  const samples = new Int16Array(chunk);
+  let sum = 0;
+  for (let i = 0; i < samples.length; i++) {
+    const v = samples[i] / 32768;
+    sum += v * v;
+  }
+  const rms = Math.sqrt(sum / samples.length);
+  // RMS of speech rarely exceeds ~0.25; expand it into the visible range.
+  return Math.min(1, Math.sqrt(rms) * 1.8);
+}
+
+function Waveform({ levels, active }: { levels: number[]; active: boolean }) {
+  return (
+    <div
+      aria-hidden="true"
+      className={`flex h-12 items-center justify-center gap-[3px] transition-opacity duration-500 ${
+        active ? "opacity-100" : "opacity-30"
+      }`}
+    >
+      {levels.map((level, i) => (
+        <span
+          key={i}
+          className="wave-bar w-[3px] rounded-full bg-foreground/50"
+          style={{ height: `${4 + level * 40}px` }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** Designed panel for error and guidance states. */
+function StatePanel({
+  title,
+  body,
+  actionLabel,
+  onAction,
+  alert = false,
+}: {
+  title: string;
+  body: string;
+  actionLabel?: string;
+  onAction?: () => void;
+  alert?: boolean;
+}) {
+  return (
+    <div
+      role={alert ? "alert" : undefined}
+      className="mx-auto flex w-full max-w-md flex-col items-center gap-3 rounded-2xl border border-line bg-surface/60 px-8 py-8 text-center"
+    >
+      <span
+        aria-hidden="true"
+        className={`h-1.5 w-1.5 rounded-full ${alert ? "bg-accent" : "bg-faint"}`}
+      />
+      <p className="text-sm font-medium text-foreground">{title}</p>
+      <p className="text-sm leading-6 text-muted">{body}</p>
+      {actionLabel && onAction && (
+        <button
+          type="button"
+          onClick={onAction}
+          className="mt-2 rounded-full border border-line bg-background px-4 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-accent/70"
+        >
+          {actionLabel}
+        </button>
+      )}
+    </div>
+  );
+}
+
 export default function Home() {
+  const reducedMotion = useReducedMotion();
+
   const captureRef = useRef<AudioCapture | null>(null);
   const streamRef = useRef<AssemblyAIStream | null>(null);
   const answerAbortRef = useRef<AbortController | null>(null);
@@ -38,11 +117,14 @@ export default function Home() {
   const [finals, setFinals] = useState<string[]>([]);
   const [partial, setPartial] = useState("");
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [sessionError, setSessionError] = useState<SessionErrorKind | null>(
+    null
+  );
+  const [levels, setLevels] = useState<number[]>(FLAT_LEVELS);
 
   const [answer, setAnswer] = useState<AnswerPayload | null>(null);
   const [answerLoading, setAnswerLoading] = useState(false);
-  const [answerError, setAnswerError] = useState<string | null>(null);
+  const [answerError, setAnswerError] = useState<AnswerError | null>(null);
 
   // Fired only for finalized turns (end_of_turn: true) — never partials.
   // A newer final cancels any in-flight request instead of racing it.
@@ -66,7 +148,7 @@ export default function Home() {
       }
       const data: unknown = await res.json();
       if (!res.ok || !isAnswerPayload(data)) {
-        setAnswerError("Failed to generate answer");
+        setAnswerError({ kind: "api", question });
         setAnswer(null);
       } else {
         setAnswer(data);
@@ -77,7 +159,7 @@ export default function Home() {
         return; // Superseded by a newer final; that request owns the UI now.
       }
       if (answerAbortRef.current === controller) {
-        setAnswerError("Failed to generate answer");
+        setAnswerError({ kind: "network", question });
         setAnswer(null);
         setAnswerLoading(false);
       }
@@ -90,6 +172,7 @@ export default function Home() {
     captureRef.current = null;
     streamRef.current = null;
     setRunning(false);
+    setLevels(FLAT_LEVELS);
     // Stop the mic first so no audio is sent while the session terminates.
     if (capture) {
       await capture.stop();
@@ -101,7 +184,7 @@ export default function Home() {
 
   const startPipeline = useCallback(async () => {
     setStarting(true);
-    setError(null);
+    setSessionError(null);
     setFinals([]);
     setPartial("");
     setLatencyMs(null);
@@ -118,7 +201,7 @@ export default function Home() {
           void requestAnswer(turn.transcript);
         }
       },
-      onError: (err) => setError(err.message),
+      onError: () => setSessionError("connection"),
       onSessionEnd: () => {
         // Covers server-side closes and the hidden-tab auto-terminate.
         void stopPipeline();
@@ -130,13 +213,18 @@ export default function Home() {
 
     try {
       await stream.start();
-      await capture.start((chunk) => stream.sendAudio(chunk));
+      await capture.start((chunk) => {
+        stream.sendAudio(chunk);
+        const level = chunkLevel(chunk);
+        setLevels((prev) => [...prev.slice(1), level]);
+      });
       setRunning(true);
     } catch (err) {
       if (err instanceof MicrophonePermissionError) {
-        setError("Microphone access was denied — allow it and try again.");
+        setSessionError("mic-denied");
       } else {
-        setError(err instanceof Error ? err.message : String(err));
+        setSessionError("connection");
+        console.error(err);
       }
       await stopPipeline();
     } finally {
@@ -144,7 +232,7 @@ export default function Home() {
     }
   }, [requestAnswer, stopPipeline]);
 
-  const handleClick = () => {
+  const toggleRecording = () => {
     if (running) {
       void stopPipeline();
     } else {
@@ -152,56 +240,266 @@ export default function Home() {
     }
   };
 
+  const retryAnswer = () => {
+    if (answerError) {
+      void requestAnswer(answerError.question);
+    }
+  };
+
+  const connectionLabel = starting
+    ? "Connecting"
+    : running
+      ? "Listening"
+      : "Offline";
+
+  const hasTranscript = finals.length > 0 || partial.length > 0;
+  const firstLoad =
+    !running && !starting && !hasTranscript && !sessionError && !answer;
+  const enter = reducedMotion
+    ? { opacity: 0 }
+    : ({ opacity: 0, y: 14 } as const);
+  const entered = reducedMotion
+    ? { opacity: 1 }
+    : ({ opacity: 1, y: 0 } as const);
+
   return (
-    <main className="mx-auto flex max-w-2xl flex-col gap-6 p-8 font-sans">
-      <h1 className="text-xl font-semibold">Streaming pipeline test harness</h1>
+    <div className="flex min-h-screen flex-col">
+      <main className="mx-auto flex w-full max-w-[720px] flex-1 flex-col items-center gap-12 px-6 pb-24 pt-20">
+        <header className="flex flex-col items-center gap-2 text-center">
+          <h1 className="text-lg font-medium tracking-tight">Kluely</h1>
+          <p className="text-sm text-muted">
+            Speak an interview question. Answer in Klingon.
+          </p>
+        </header>
 
-      <div className="flex items-center gap-4">
-        <button
-          onClick={handleClick}
-          disabled={starting}
-          className="rounded border px-4 py-2 disabled:opacity-50"
+        {/* Primary action */}
+        <div className="flex flex-col items-center gap-6">
+          <button
+            type="button"
+            onClick={toggleRecording}
+            disabled={starting}
+            aria-pressed={running}
+            aria-label={running ? "Stop listening" : "Start listening"}
+            className={`relative flex h-24 w-24 items-center justify-center rounded-full border transition-colors duration-300 disabled:opacity-60 ${
+              running
+                ? "recording-pulse border-accent bg-accent"
+                : "border-line bg-surface hover:border-accent/70"
+            }`}
+          >
+            {running ? (
+              <span className="h-7 w-7 rounded-[6px] bg-background" />
+            ) : (
+              <span className="h-7 w-7 rounded-full bg-accent" />
+            )}
+          </button>
+          <Waveform levels={levels} active={running} />
+        </div>
+
+        {/* Session state: first-load hint, errors, or live transcript */}
+        <section
+          aria-live="polite"
+          aria-label="Live transcript"
+          className="min-h-16 w-full text-center"
         >
-          {starting ? "Starting…" : running ? "Stop" : "Start"}
-        </button>
-        <span className="text-sm">
-          Latency: {latencyMs !== null ? `${latencyMs} ms` : "—"}
-        </span>
-      </div>
+          <AnimatePresence mode="wait">
+            {sessionError === "mic-denied" ? (
+              <motion.div
+                key="mic-denied"
+                initial={enter}
+                animate={entered}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.3 }}
+              >
+                <StatePanel
+                  alert
+                  title="Microphone access is blocked"
+                  body="Kluely needs to hear the question. Allow microphone access for this site in your browser's address bar, then try again."
+                  actionLabel="Try again"
+                  onAction={() => void startPipeline()}
+                />
+              </motion.div>
+            ) : sessionError === "connection" ? (
+              <motion.div
+                key="connection-error"
+                initial={enter}
+                animate={entered}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.3 }}
+              >
+                <StatePanel
+                  alert
+                  title="Connection lost"
+                  body="The transcription session ended unexpectedly. Check your network and start again — nothing you said was lost."
+                  actionLabel="Reconnect"
+                  onAction={() => void startPipeline()}
+                />
+              </motion.div>
+            ) : firstLoad ? (
+              <motion.div
+                key="first-load"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.3 }}
+                className="flex flex-col items-center gap-2"
+              >
+                <p className="text-sm text-muted">
+                  Press the button and ask an interview question aloud.
+                </p>
+                <p className="text-sm text-faint">
+                  Try{" "}
+                  <span className="text-muted">
+                    &ldquo;Tell me about yourself.&rdquo;
+                  </span>{" "}
+                  — the answer comes back in Klingon.
+                </p>
+              </motion.div>
+            ) : (
+              <motion.div
+                key="transcript"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.3 }}
+              >
+                {hasTranscript ? (
+                  <p className="text-base leading-7 text-muted">
+                    {finals.join(" ")}
+                    {partial && <span className="text-faint"> {partial}</span>}
+                  </p>
+                ) : (
+                  <p className="text-sm text-faint">
+                    {running
+                      ? "Listening — ask your question aloud."
+                      : "Connecting to transcription…"}
+                  </p>
+                )}
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </section>
 
-      {error && <p className="text-sm text-red-600">{error}</p>}
+        {/* Answer */}
+        <section aria-label="Answer" className="w-full flex-1">
+          <AnimatePresence mode="wait">
+            {answerLoading ? (
+              <motion.div
+                key="thinking"
+                initial={enter}
+                animate={entered}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.3 }}
+                className="flex items-center justify-center gap-2 pt-6"
+                aria-label="Composing answer"
+              >
+                {[0, 1, 2].map((i) => (
+                  <span
+                    key={i}
+                    className="thinking-dot h-1.5 w-1.5 rounded-full bg-muted"
+                    style={{ animationDelay: `${i * 0.2}s` }}
+                  />
+                ))}
+              </motion.div>
+            ) : answerError ? (
+              <motion.div
+                key="answer-error"
+                initial={enter}
+                animate={entered}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.3 }}
+                className="pt-6"
+              >
+                <StatePanel
+                  alert
+                  title={
+                    answerError.kind === "network"
+                      ? "Couldn't reach the server"
+                      : "Couldn't compose an answer"
+                  }
+                  body={
+                    answerError.kind === "network"
+                      ? "The request didn't make it out. Check your connection — your question is saved."
+                      : "Something went wrong while generating the Klingon. Your question is saved, so just retry."
+                  }
+                  actionLabel="Retry"
+                  onAction={retryAnswer}
+                />
+              </motion.div>
+            ) : answer ? (
+              <motion.dl
+                key={answer.klingon}
+                initial={enter}
+                animate={entered}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
+                className="flex flex-col gap-8 border-t border-line pt-10"
+              >
+                <div className="flex flex-col gap-2">
+                  <dt className="text-[11px] font-medium uppercase tracking-[0.18em] text-faint">
+                    Klingon
+                  </dt>
+                  <dd className="text-3xl font-semibold leading-tight tracking-tight">
+                    {answer.klingon}
+                  </dd>
+                </div>
+                <div className="flex flex-col gap-2">
+                  <dt className="text-[11px] font-medium uppercase tracking-[0.18em] text-faint">
+                    pIqaD
+                  </dt>
+                  <dd className="piqad text-2xl leading-snug text-foreground/90">
+                    {answer.pIqaD}
+                  </dd>
+                </div>
+                <div className="flex flex-col gap-2">
+                  <dt className="text-[11px] font-medium uppercase tracking-[0.18em] text-faint">
+                    Back-translation
+                  </dt>
+                  <dd className="text-sm leading-6 text-muted">
+                    {answer.backTranslation}
+                  </dd>
+                </div>
+                <div className="flex flex-col gap-2 border-t border-line/60 pt-6">
+                  <dt className="text-[11px] font-medium uppercase tracking-[0.18em] text-faint">
+                    Suggested answer
+                  </dt>
+                  <dd className="text-sm leading-6 text-faint">
+                    {answer.english}
+                  </dd>
+                </div>
+              </motion.dl>
+            ) : hasTranscript || running ? (
+              <motion.p
+                key="empty"
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.3 }}
+                className="pt-6 text-center text-sm text-faint"
+              >
+                Your answer will appear here — Klingon first.
+              </motion.p>
+            ) : null}
+          </AnimatePresence>
+        </section>
+      </main>
 
-      <div className="whitespace-pre-wrap text-base leading-7">
-        {finals.join(" ")}
-        {partial && <span className="opacity-50"> {partial}</span>}
-      </div>
-
-      <section className="flex flex-col gap-3 border-t pt-4">
-        <h2 className="text-sm font-semibold uppercase tracking-wide">
-          Answer {answerLoading && <span className="font-normal">…generating</span>}
-        </h2>
-        {answerError && <p className="text-sm text-red-600">{answerError}</p>}
-        {answer && (
-          <dl className="flex flex-col gap-2 text-base leading-7">
-            <div>
-              <dt className="text-xs uppercase opacity-60">English</dt>
-              <dd>{answer.english}</dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase opacity-60">Klingon</dt>
-              <dd>{answer.klingon}</dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase opacity-60">pIqaD</dt>
-              <dd>{answer.pIqaD}</dd>
-            </div>
-            <div>
-              <dt className="text-xs uppercase opacity-60">Back-translation</dt>
-              <dd>{answer.backTranslation}</dd>
-            </div>
-          </dl>
-        )}
-      </section>
-    </main>
+      {/* Persistent status bar */}
+      <footer className="fixed inset-x-0 bottom-0 border-t border-line bg-background/85 backdrop-blur">
+        <div className="mx-auto flex h-10 w-full max-w-[720px] items-center justify-between px-6 text-xs text-muted">
+          <span className="flex items-center gap-2">
+            <span
+              aria-hidden="true"
+              className={`h-1.5 w-1.5 rounded-full ${
+                running ? "bg-accent" : starting ? "bg-muted" : "bg-faint"
+              }`}
+            />
+            {connectionLabel}
+          </span>
+          <span className="font-mono tabular-nums">
+            {latencyMs !== null ? `${latencyMs} ms` : "— ms"}
+          </span>
+        </div>
+      </footer>
+    </div>
   );
 }

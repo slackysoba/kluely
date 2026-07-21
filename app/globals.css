@@ -1,26 +1,91 @@
 @import "tailwindcss";
 
+/* Premium dark identity: near-black ground, one Klingon-red accent,
+   everything else expressed through greys and spacing. */
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: dark;
+  --background: #0a0a0b;
+  --foreground: #ededef;
+  --muted: #8a8a93;
+  --faint: #55555e;
+  --surface: #121214;
+  --border: #232328;
+  --accent: #d6323c;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-surface: var(--surface);
+  --color-line: var(--border);
+  --color-accent: var(--accent);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), system-ui, sans-serif;
+}
+
+/* Klingon pIqaD script (CSUR PUA U+F8D0–U+F8FF). */
+.piqad {
+  font-family: var(--font-piqad), sans-serif;
+}
+
+/* Accessible, brand-consistent focus. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* Gentle ripple on the record button while listening. */
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgb(214 50 60 / 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 20px rgb(214 50 60 / 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgb(214 50 60 / 0);
+  }
+}
+.recording-pulse {
+  animation: pulse-ring 2.2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.wave-bar {
+  transition: height 120ms ease-out;
+}
+
+@keyframes thinking-dot {
+  0%,
+  80%,
+  100% {
+    opacity: 0.25;
+  }
+  40% {
+    opacity: 1;
+  }
+}
+.thinking-dot {
+  animation: thinking-dot 1.2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .recording-pulse {
+    animation: none;
+    box-shadow: 0 0 0 4px rgb(214 50 60 / 0.25);
+  }
+  .wave-bar {
+    transition: none;
+  }
+  .thinking-dot {
+    animation: none;
+    opacity: 0.6;
+  }
 }
