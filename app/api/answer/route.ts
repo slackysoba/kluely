@@ -8,7 +8,7 @@ import { NextResponse } from "next/server";
 import { KLINGON_GRAMMAR_PRIMER } from "@/lib/klingon-grammar";
 
 // Fastest Flash-family model. Swap here if a newer one ships.
-const MODEL = "gemini-2.5-flash-lite";
+const MODEL = "gemini-3.5-flash-lite";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 
 // One overall budget shared by both attempts, not 10s per attempt.
