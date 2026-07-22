@@ -6,6 +6,7 @@
 
 import { NextResponse } from "next/server";
 import { KLINGON_GRAMMAR_PRIMER } from "@/lib/klingon-grammar";
+import { toPiqad } from "@/lib/piqad";
 import {
   KeyedSlidingWindow,
   SlidingWindow,
@@ -45,6 +46,8 @@ const SYSTEM_INSTRUCTION = `You are an elite interview coach. The user gives you
 
 Then render that answer in Klingon according to the primer below.
 
+One override to the primer's output requirements: do NOT produce the pIqaD field. Return only english, klingon, and backTranslation. The pIqaD transliteration is derived mechanically from your Latin transcription, so the correctness of the klingon field's spelling and capitalization is what matters.
+
 ${KLINGON_GRAMMAR_PRIMER}`;
 
 const RESPONSE_SCHEMA = {
@@ -60,18 +63,14 @@ const RESPONSE_SCHEMA = {
       description:
         "The answer in Klingon, Latin transcription, correct capitalization, OVS order.",
     },
-    pIqaD: {
-      type: "STRING",
-      description: "The Klingon text transliterated into pIqaD script.",
-    },
     backTranslation: {
       type: "STRING",
       description:
         "A literal, structure-revealing English back-translation of the Klingon.",
     },
   },
-  required: ["english", "klingon", "pIqaD", "backTranslation"],
-  propertyOrdering: ["english", "klingon", "pIqaD", "backTranslation"],
+  required: ["english", "klingon", "backTranslation"],
+  propertyOrdering: ["english", "klingon", "backTranslation"],
 } as const;
 
 function parseAnswer(text: string): AnswerPayload | null {
@@ -81,18 +80,19 @@ function parseAnswer(text: string): AnswerPayload | null {
       return null;
     }
     const record = data as Record<string, unknown>;
-    const { english, klingon, pIqaD, backTranslation } = record;
+    const { english, klingon, backTranslation } = record;
     if (
       typeof english === "string" &&
       english.length > 0 &&
       typeof klingon === "string" &&
       klingon.length > 0 &&
-      typeof pIqaD === "string" &&
-      pIqaD.length > 0 &&
       typeof backTranslation === "string" &&
       backTranslation.length > 0
     ) {
-      return { english, klingon, pIqaD, backTranslation };
+      // pIqaD is never model output: LLMs can't reliably emit PUA
+      // codepoints, so it's transliterated deterministically from the
+      // Latin transcription (see lib/piqad.ts).
+      return { english, klingon, pIqaD: toPiqad(klingon), backTranslation };
     }
   } catch {
     // Malformed JSON from the model; caller decides whether to retry.
