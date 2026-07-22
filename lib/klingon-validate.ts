@@ -21,10 +21,35 @@ interface ValidationAnalysis {
 interface ValidationWord {
   word: string;
   valid: boolean;
+  // false when the analyzer found no analysis at all (unknown root) — the
+  // signature of a loanword or out-of-dictionary word, as opposed to a known
+  // root assembled ungrammatically (parses: true, valid: false).
+  parses?: boolean;
   analyses?: ValidationAnalysis[];
 }
 interface ValidationResult {
   words: ValidationWord[];
+}
+
+// The full Klingon letter set (case-sensitive), digraphs first so they win.
+const KLINGON_LETTER = /(tlh|ch|gh|ng|[bDHjlmnpqQrStvwy']|[aeIou])/g;
+
+/** True when a token is spelled entirely with Klingon letters. */
+function isKlingonOrthography(word: string): boolean {
+  return word.length > 0 && word.replace(KLINGON_LETTER, "").length === 0;
+}
+
+/**
+ * A word is acceptable if the analyzer validated it, OR it's a plausible
+ * loanword: unknown to the analyzer (no parse) yet properly transliterated
+ * into Klingon letters. A word that parses but is flagged ungrammatical is a
+ * genuine morphology error and is NOT accepted.
+ */
+function acceptableWord(w: ValidationWord): boolean {
+  if (w.valid) {
+    return true;
+  }
+  return w.parses === false && isKlingonOrthography(w.word);
 }
 
 /** Calls the Python validator. Best-effort: returns null on any failure. */
@@ -95,10 +120,11 @@ function meaningAligned(english: string, v: ValidationResult): boolean {
 }
 
 /**
- * Resolves a confidence signal for a Klingon rendering. "high" only when every
- * word parses as valid Klingon morphology AND the validated meaning tracks the
- * intended English; otherwise (including when the validator can't be reached)
- * "low", so we never claim verification we didn't get.
+ * Resolves a confidence signal for a Klingon rendering. "high" when every word
+ * is acceptable — valid Klingon morphology or a properly-formed loanword — with
+ * at least one genuinely valid word (so an all-loanword string can't pass), AND
+ * the validated meaning tracks the intended English. Otherwise (including when
+ * the validator can't be reached) "low", so we never over-claim verification.
  */
 export async function computeConfidence(
   klingon: string,
@@ -110,6 +136,7 @@ export async function computeConfidence(
   if (!v || v.words.length === 0) {
     return "low";
   }
-  const morphologyOk = v.words.every((w) => w.valid);
+  const morphologyOk =
+    v.words.every(acceptableWord) && v.words.some((w) => w.valid);
   return morphologyOk && meaningAligned(english, v) ? "high" : "low";
 }

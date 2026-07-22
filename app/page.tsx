@@ -474,7 +474,7 @@ function ConfidenceMarker({ confidence }: { confidence: Confidence | null }) {
       ? "Verifying the Klingon morphology with the analyzer…"
       : confidence === "low"
         ? "The Klingon morphology analyzer couldn't fully verify this output, so treat it as approximate."
-        : "Every word was verified as valid Klingon morphology by the analyzer.";
+        : "The analyzer checked every word — valid Klingon morphology, or a properly-formed loanword for a concept Klingon has no word for.";
   const tone =
     confidence === "low"
       ? "border-line text-faint hover:border-muted/70 hover:text-muted focus-visible:text-muted"
