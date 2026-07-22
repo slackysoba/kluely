@@ -532,7 +532,7 @@ export default function Home() {
           aria-describedby="donation-note"
           className="flex items-center gap-1 text-muted transition-colors hover:text-accent focus-visible:text-accent"
         >
-          Help keep the cloaking device running!
+          Help Keep Cloaking Active!
           <span
             aria-hidden="true"
             className="transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none"
@@ -810,7 +810,7 @@ export default function Home() {
               rel="noopener noreferrer"
               className="group flex items-center gap-1 text-muted transition-colors hover:text-accent focus-visible:text-accent sm:hidden"
             >
-              Help keep the cloaking device running!
+              Help Keep Cloaking Active!
               <span
                 aria-hidden="true"
                 className="transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none"
