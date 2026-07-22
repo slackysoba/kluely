@@ -43,9 +43,10 @@ const E2E_WINDOW = 50;
 // Info-tooltip copy for each sidebar latency metric.
 const METRIC_INFO = {
   endToEnd:
-    "Time from when you stop speaking to the Klingon answer appearing on " +
-    "screen. Includes transcription, the language model generating the " +
-    "Klingon, and rendering.",
+    "Generation latency: time from when you stop speaking to the Klingon " +
+    "answer appearing on screen — transcription, the language model generating " +
+    "the Klingon, and rendering. Morphology verification is measured separately " +
+    "(see Validation) and does not delay this.",
   wordEmission:
     "Median time from when a word finishes in your audio to when it appears " +
     "as transcribed text, measured in the browser. This uses AssemblyAI's " +
@@ -56,6 +57,11 @@ const METRIC_INFO = {
     "Time from when you stop speaking to when AssemblyAI signals the turn is " +
     "complete (end_of_turn). Reflects Universal-Streaming's endpointing and " +
     "turn-detection speed.",
+  validation:
+    "Verification latency: time from the Klingon appearing on screen to the " +
+    "morphology analyzer confirming it and the verified/unverified marker " +
+    "resolving. Runs asynchronously after the answer, so it never delays what " +
+    "you see.",
 } as const;
 
 /** Rounded median (p50) of a sample window, or null when it's empty. */
@@ -162,6 +168,10 @@ interface AnswerPayload {
   pIqaD: string;
   backTranslation: string;
 }
+
+// Async morphology-verification state for the current answer. "pending" while
+// the check is in flight; resolves to verified/unverified a moment later.
+type Confidence = "pending" | "high" | "low";
 
 interface HistoryEntry extends AnswerPayload {
   id: string;
@@ -418,6 +428,130 @@ function MetricStat({
   );
 }
 
+/**
+ * Understated morphology-confidence marker shown beside the Klingon answer.
+ * While verification is in flight it shows a quiet "checking" state, then
+ * resolves to a small "unverified" chip (low) or a barely-there check (high).
+ * Explains itself via a tooltip that opens on hover, keyboard focus, and tap,
+ * and carries an aria-label. Nothing renders before verification has started.
+ */
+function ConfidenceMarker({ confidence }: { confidence: Confidence | null }) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLSpanElement>(null);
+  const tooltipId = useId();
+
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onDocPointer = (event: PointerEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onDocPointer);
+    return () => document.removeEventListener("pointerdown", onDocPointer);
+  }, [open]);
+
+  if (confidence === null) {
+    return null;
+  }
+
+  const label =
+    confidence === "pending"
+      ? "checking…"
+      : confidence === "low"
+        ? "unverified"
+        : "verified";
+  const ariaLabel =
+    confidence === "pending"
+      ? "Checking Klingon morphology"
+      : confidence === "low"
+        ? "Unverified — the morphology analyzer couldn't fully verify this Klingon"
+        : "Verified Klingon morphology";
+  const description =
+    confidence === "pending"
+      ? "Verifying the Klingon morphology with the analyzer…"
+      : confidence === "low"
+        ? "The Klingon morphology analyzer couldn't fully verify this output, so treat it as approximate."
+        : "Every word was verified as valid Klingon morphology by the analyzer.";
+  const tone =
+    confidence === "low"
+      ? "border-line text-faint hover:border-muted/70 hover:text-muted focus-visible:text-muted"
+      : "border-line/50 text-faint/70 hover:text-muted focus-visible:text-muted";
+
+  return (
+    <span ref={wrapRef} className="relative inline-flex">
+      <button
+        type="button"
+        aria-label={ariaLabel}
+        aria-expanded={open}
+        aria-describedby={open ? tooltipId : undefined}
+        onPointerDown={(event) => {
+          if (event.pointerType !== "mouse") {
+            event.preventDefault();
+            setOpen((prev) => !prev);
+          }
+        }}
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            setOpen(false);
+          }
+        }}
+        className={`flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[9px] uppercase leading-none tracking-[0.14em] transition-colors ${tone}`}
+      >
+        {confidence === "pending" ? (
+          <span
+            aria-hidden="true"
+            className="thinking-dot h-1.5 w-1.5 rounded-full bg-current"
+          />
+        ) : confidence === "low" ? (
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 12 12"
+            className="h-2.5 w-2.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+          >
+            <circle cx="6" cy="6" r="4.6" />
+            <path d="M6 3.8v2.6" />
+            <path d="M6 8.4h0.01" />
+          </svg>
+        ) : (
+          <svg
+            aria-hidden="true"
+            viewBox="0 0 12 12"
+            className="h-2.5 w-2.5"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.6"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M2.5 6.4 5 8.8l4.5-5.2" />
+          </svg>
+        )}
+        {label}
+      </button>
+      {open && (
+        <span
+          role="tooltip"
+          id={tooltipId}
+          className="absolute left-0 top-full z-30 mt-2 w-56 rounded-lg border border-line bg-surface px-3 py-2 text-left text-[11px] font-normal normal-case leading-4 tracking-normal text-muted shadow-xl"
+        >
+          {description}
+        </span>
+      )}
+    </span>
+  );
+}
+
 /** Designed panel for error and guidance states. */
 function StatePanel({
   title,
@@ -479,6 +613,11 @@ export default function Home() {
   // when the last final turn fired, plus its rolling sample window.
   const turnEndAtRef = useRef<number | null>(null);
   const e2eSamplesRef = useRef<number[]>([]);
+  // Async morphology verification runs after the answer paints; its own abort
+  // controller and rolling sample window keep validation latency distinct from
+  // generation latency (end-to-end).
+  const verifyAbortRef = useRef<AbortController | null>(null);
+  const validationSamplesRef = useRef<number[]>([]);
 
   const [mode, setMode] = useState<CaptureMode>("practice");
   const [running, setRunning] = useState(false);
@@ -489,6 +628,7 @@ export default function Home() {
   const [endToEndMs, setEndToEndMs] = useState<number | null>(null);
   const [wordEmissionMs, setWordEmissionMs] = useState<number | null>(null);
   const [turnDetectionMs, setTurnDetectionMs] = useState<number | null>(null);
+  const [validationMs, setValidationMs] = useState<number | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [sessionError, setSessionError] = useState<SessionErrorKind | null>(
     null
@@ -498,6 +638,7 @@ export default function Home() {
   const [answer, setAnswer] = useState<AnswerPayload | null>(null);
   const [answerLoading, setAnswerLoading] = useState(false);
   const [answerError, setAnswerError] = useState<AnswerError | null>(null);
+  const [confidence, setConfidence] = useState<Confidence | null>(null);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
 
   // Mirror the live exchange into refs so archiving reads the latest values
@@ -565,51 +706,113 @@ export default function Home() {
     }
   }, []);
 
+  // Verify the rendered Klingon's morphology out-of-band, then resolve the
+  // confidence marker. Measures its own latency so validation time stays
+  // separate from generation time. A newer answer supersedes an in-flight check.
+  const verifyAnswer = useCallback(
+    async (klingon: string, english: string) => {
+      verifyAbortRef.current?.abort();
+      const controller = new AbortController();
+      verifyAbortRef.current = controller;
+      setConfidence("pending");
+      const startedAt = performance.now();
+
+      try {
+        const res = await fetch("/api/verify", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ klingon, english }),
+          signal: controller.signal,
+        });
+        if (verifyAbortRef.current !== controller) {
+          return; // A newer answer's verification owns the marker now.
+        }
+        let resolved: Confidence = "low";
+        if (res.ok) {
+          const data = (await res.json().catch(() => null)) as {
+            confidence?: unknown;
+          } | null;
+          if (data?.confidence === "high" || data?.confidence === "low") {
+            resolved = data.confidence;
+          }
+        }
+        if (verifyAbortRef.current !== controller) {
+          return;
+        }
+        setConfidence(resolved);
+        // Validation latency: answer-on-screen → marker resolved.
+        const samples = validationSamplesRef.current;
+        samples.push(performance.now() - startedAt);
+        if (samples.length > E2E_WINDOW) {
+          samples.shift();
+        }
+        setValidationMs(median(samples));
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return; // Superseded; the newer check owns the marker.
+        }
+        if (verifyAbortRef.current === controller) {
+          setConfidence("low"); // Couldn't verify — honestly unverified.
+        }
+      }
+    },
+    []
+  );
+
   // Fired only for finalized turns (end_of_turn: true) — never partials.
   // A newer final cancels any in-flight request instead of racing it.
-  const requestAnswer = useCallback(async (question: string) => {
-    answerAbortRef.current?.abort();
-    const controller = new AbortController();
-    answerAbortRef.current = controller;
-    setAnswerLoading(true);
-    setAnswerError(null);
+  const requestAnswer = useCallback(
+    async (question: string) => {
+      answerAbortRef.current?.abort();
+      // A new answer invalidates any pending verification and its marker.
+      verifyAbortRef.current?.abort();
+      verifyAbortRef.current = null;
+      setConfidence(null);
+      const controller = new AbortController();
+      answerAbortRef.current = controller;
+      setAnswerLoading(true);
+      setAnswerError(null);
 
-    try {
-      const res = await fetch("/api/answer", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question }),
-        signal: controller.signal,
-      });
-      // A newer final may have superseded this request while we awaited.
-      if (answerAbortRef.current !== controller) {
-        return;
-      }
-      if (res.status === 429) {
-        setAnswerError({ kind: "rate-limited", question });
-        setAnswer(null);
+      try {
+        const res = await fetch("/api/answer", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ question }),
+          signal: controller.signal,
+        });
+        // A newer final may have superseded this request while we awaited.
+        if (answerAbortRef.current !== controller) {
+          return;
+        }
+        if (res.status === 429) {
+          setAnswerError({ kind: "rate-limited", question });
+          setAnswer(null);
+          setAnswerLoading(false);
+          return;
+        }
+        const data: unknown = await res.json();
+        if (!res.ok || !isAnswerPayload(data)) {
+          setAnswerError({ kind: "api", question });
+          setAnswer(null);
+        } else {
+          // Show the Klingon immediately, then verify it asynchronously.
+          setAnswer(data);
+          void verifyAnswer(data.klingon, data.english);
+        }
         setAnswerLoading(false);
-        return;
+      } catch (err) {
+        if (err instanceof DOMException && err.name === "AbortError") {
+          return; // Superseded by a newer final; that request owns the UI now.
+        }
+        if (answerAbortRef.current === controller) {
+          setAnswerError({ kind: "network", question });
+          setAnswer(null);
+          setAnswerLoading(false);
+        }
       }
-      const data: unknown = await res.json();
-      if (!res.ok || !isAnswerPayload(data)) {
-        setAnswerError({ kind: "api", question });
-        setAnswer(null);
-      } else {
-        setAnswer(data);
-      }
-      setAnswerLoading(false);
-    } catch (err) {
-      if (err instanceof DOMException && err.name === "AbortError") {
-        return; // Superseded by a newer final; that request owns the UI now.
-      }
-      if (answerAbortRef.current === controller) {
-        setAnswerError({ kind: "network", question });
-        setAnswer(null);
-        setAnswerLoading(false);
-      }
-    }
-  }, []);
+    },
+    [verifyAnswer]
+  );
 
   const stopPipeline = useCallback(async () => {
     const capture = captureRef.current;
@@ -620,11 +823,14 @@ export default function Home() {
     archiveCurrent();
     answerAbortRef.current?.abort();
     answerAbortRef.current = null;
+    verifyAbortRef.current?.abort();
+    verifyAbortRef.current = null;
     setRunning(false);
     setLevels(FLAT_LEVELS);
     setCurrentQuestion("");
     setPartial("");
     setAnswer(null);
+    setConfidence(null);
     setAnswerLoading(false);
     // Stop the mic first so no audio is sent while the session terminates.
     if (capture) {
@@ -645,10 +851,15 @@ export default function Home() {
     setEndToEndMs(null);
     setWordEmissionMs(null);
     setTurnDetectionMs(null);
+    setValidationMs(null);
     turnEndAtRef.current = null;
     e2eSamplesRef.current = [];
+    validationSamplesRef.current = [];
+    verifyAbortRef.current?.abort();
+    verifyAbortRef.current = null;
     setElapsedMs(0);
     setAnswer(null);
+    setConfidence(null);
     setAnswerError(null);
     setAnswerLoading(false);
 
@@ -877,6 +1088,11 @@ export default function Home() {
                         value={formatLatency(turnDetectionMs)}
                         description={METRIC_INFO.turnDetection}
                       />
+                      <MetricStat
+                        name="Validation"
+                        value={formatLatency(validationMs)}
+                        description={METRIC_INFO.validation}
+                      />
                     </div>
                     <div className="flex items-center gap-1.5 border-t border-line/70 pt-4 w-full justify-center">
                       <span
@@ -925,6 +1141,7 @@ export default function Home() {
                       answer={answer}
                       loading={answerLoading}
                       error={answerError}
+                      confidence={confidence}
                       onRetry={retryAnswer}
                       fade={fade}
                     />
@@ -1125,12 +1342,14 @@ function AnswerStage({
   answer,
   loading,
   error,
+  confidence,
   onRetry,
   fade,
 }: {
   answer: AnswerPayload | null;
   loading: boolean;
   error: AnswerError | null;
+  confidence: Confidence | null;
   onRetry: () => void;
   fade: object;
 }) {
@@ -1185,7 +1404,10 @@ function AnswerStage({
           className="flex flex-col gap-5"
         >
           <div className="flex flex-col gap-2">
-            <StageLabel>Answer</StageLabel>
+            <div className="flex items-center gap-2">
+              <StageLabel>Answer</StageLabel>
+              <ConfidenceMarker confidence={confidence} />
+            </div>
             <p className="text-3xl font-semibold leading-tight tracking-tight text-foreground sm:text-4xl lg:text-5xl">
               {answer.klingon}
             </p>

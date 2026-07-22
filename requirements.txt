@@ -1,0 +1,3 @@
+# Python dependencies for the Vercel Python serverless functions in api/*.py.
+# yajwiz pulls in appdirs + requests transitively.
+yajwiz==0.10.4

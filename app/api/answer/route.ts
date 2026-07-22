@@ -25,8 +25,10 @@ import {
 const MODEL = "gemini-3.5-flash-lite";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 
-// One overall budget shared by both model calls, not per-call.
-const TIMEOUT_MS = 10_000;
+// One overall budget shared by the two grounded model calls. Morphology
+// validation runs separately (app/api/verify), off the visible answer's
+// critical path, so it doesn't count against this.
+const TIMEOUT_MS = 12_000;
 const MAX_QUESTION_LENGTH = 2_000;
 
 // Grounding knobs: cap how many verified roots each concept contributes and how
@@ -93,6 +95,8 @@ const SEED_CONCEPTS = [
   "do",
 ];
 
+// Confidence is no longer part of generation: the client requests it
+// separately from /api/verify once the answer is on screen.
 interface AnswerPayload {
   english: string;
   klingon: string;
@@ -406,6 +410,10 @@ ${english}
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Grounded flow (generate and return immediately; validation is separate)
+// ---------------------------------------------------------------------------
+
 /** Orchestrates the grounded two-step flow into a full payload. */
 async function generateGroundedAnswer(
   question: string,
@@ -516,7 +524,8 @@ export async function POST(request: Request) {
 
   const signal = AbortSignal.timeout(TIMEOUT_MS);
   try {
-    // Primary: grounded, lexicon-backed generation.
+    // Primary: grounded, lexicon-backed generation. Returns immediately; the
+    // client verifies morphology separately via /api/verify.
     const grounded = await generateGroundedAnswer(question, apiKey, signal);
     if (grounded) {
       return NextResponse.json(grounded);
