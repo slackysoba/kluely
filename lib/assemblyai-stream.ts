@@ -15,6 +15,9 @@ const BYTES_PER_SAMPLE = 2;
 const LATENCY_WINDOW = 50;
 // Samples above this are a stale anchor or clock glitch, not real latency.
 const MAX_PLAUSIBLE_LATENCY_MS = 5_000;
+// Turn detection includes the endpointing silence wait, so it runs longer than
+// word emission; anything past this is a stale anchor rather than real.
+const MAX_PLAUSIBLE_TURN_MS = 10_000;
 
 export interface TurnWord {
   text: string;
@@ -66,13 +69,20 @@ export interface AssemblyAIStreamCallbacks {
   /** Turn message with end_of_turn: true — finalized, formatted transcript. */
   onFinalTranscript?: (turn: TurnMessage) => void;
   /**
-   * Fired whenever the rolling-median (p50) transcription latency updates: the
-   * time from sending a chunk of audio to the corresponding word first
-   * appearing in a Turn message (partial or final), in milliseconds. This is
-   * the streaming latency AssemblyAI publishes (~300ms p50), not the
-   * finalization tail.
+   * Fired whenever the rolling-median (p50) word-emission latency updates: the
+   * time from a word finishing in the audio to that word first appearing in a
+   * Turn message (partial or final), in milliseconds. This is the streaming
+   * latency AssemblyAI publishes (~150ms server-side), measured end-to-end in
+   * the browser so it also carries network round-trip and client buffering.
    */
-  onLatency?: (p50Ms: number) => void;
+  onWordEmissionLatency?: (p50Ms: number) => void;
+  /**
+   * Fired whenever the rolling-median (p50) turn-detection latency updates: the
+   * time from speech stopping (the last word's audio end) to the server
+   * signalling the turn is complete (end_of_turn), in milliseconds. Reflects
+   * Universal-Streaming's endpointing and turn-detection speed.
+   */
+  onTurnDetectionLatency?: (p50Ms: number) => void;
   onError?: (error: Error) => void;
   /**
    * Fired once when the session is over, however it ended. `termination` is
@@ -88,6 +98,18 @@ export class SessionCapacityError extends Error {
     super("All demo session slots are currently in use");
     this.name = "SessionCapacityError";
   }
+}
+
+/** Rounded median (p50) of a sample window, or null when it's empty. */
+function median(samples: number[]): number | null {
+  const n = samples.length;
+  if (n === 0) {
+    return null;
+  }
+  const sorted = [...samples].sort((a, b) => a - b);
+  const mid = Math.floor(n / 2);
+  const value = n % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+  return Math.round(value);
 }
 
 function parseServerMessage(raw: string): ServerMessage | null {
@@ -139,6 +161,7 @@ export class AssemblyAIStream {
   private audioMsSent = 0;
   private audioClockBase: number | null = null;
   private latencySamples: number[] = [];
+  private turnLatencySamples: number[] = [];
   private measuredTurnOrder: number | null = null;
   private measuredWordCount = 0;
 
@@ -154,9 +177,14 @@ export class AssemblyAIStream {
     return this.sessionId;
   }
 
-  /** Rolling median (p50) transcription latency in ms, or null before any word. */
-  get latencyP50Ms(): number | null {
-    return this.medianLatencyMs();
+  /** Rolling median (p50) word-emission latency in ms, or null before any word. */
+  get wordEmissionP50Ms(): number | null {
+    return median(this.latencySamples);
+  }
+
+  /** Rolling median (p50) turn-detection latency in ms, or null before any turn. */
+  get turnDetectionP50Ms(): number | null {
+    return median(this.turnLatencySamples);
   }
 
   /** Fetches a token, opens the socket, and resolves once the session has begun. */
@@ -171,6 +199,7 @@ export class AssemblyAIStream {
     this.audioMsSent = 0;
     this.audioClockBase = null;
     this.latencySamples = [];
+    this.turnLatencySamples = [];
     this.measuredTurnOrder = null;
     this.measuredWordCount = 0;
 
@@ -320,10 +349,12 @@ export class AssemblyAIStream {
       }
       case "Turn": {
         const turn = message as TurnMessage;
-        // Measure streaming latency on every Turn — partial or final — from the
-        // first appearance of each word.
+        // Measure word-emission latency on every Turn — partial or final — from
+        // the first appearance of each word.
         this.recordWordLatencies(turn);
         if (turn.end_of_turn) {
+          // Turn-detection latency is only meaningful on the finalized turn.
+          this.recordTurnLatency(turn);
           this.callbacks.onFinalTranscript?.(turn);
         } else {
           this.callbacks.onPartialTranscript?.(turn);
@@ -382,22 +413,36 @@ export class AssemblyAIStream {
     if (this.latencySamples.length > LATENCY_WINDOW) {
       this.latencySamples.shift();
     }
-    const p50 = this.medianLatencyMs();
+    const p50 = median(this.latencySamples);
     if (p50 !== null) {
-      this.callbacks.onLatency?.(p50);
+      this.callbacks.onWordEmissionLatency?.(p50);
     }
   }
 
-  private medianLatencyMs(): number | null {
-    const n = this.latencySamples.length;
-    if (n === 0) {
-      return null;
+  /**
+   * Records turn-detection latency for a finalized turn: the delay between the
+   * moment speech stopped (the last word's audio end) and receiving the
+   * end_of_turn signal. Reflects Universal-Streaming's endpointing speed.
+   */
+  private recordTurnLatency(turn: TurnMessage): void {
+    if (this.audioClockBase === null || !turn.words || turn.words.length === 0) {
+      return;
     }
-    const sorted = [...this.latencySamples].sort((a, b) => a - b);
-    const mid = Math.floor(n / 2);
-    const median =
-      n % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
-    return Math.round(median);
+    const lastWord = turn.words[turn.words.length - 1];
+    // audioClockBase + end is the wall-clock moment speech stopped.
+    const speechStoppedAt = this.audioClockBase + lastWord.end;
+    const latency = performance.now() - speechStoppedAt;
+    if (latency < 0 || latency >= MAX_PLAUSIBLE_TURN_MS) {
+      return;
+    }
+    this.turnLatencySamples.push(latency);
+    if (this.turnLatencySamples.length > LATENCY_WINDOW) {
+      this.turnLatencySamples.shift();
+    }
+    const p50 = median(this.turnLatencySamples);
+    if (p50 !== null) {
+      this.callbacks.onTurnDetectionLatency?.(p50);
+    }
   }
 
   private handleClose(event: CloseEvent): void {

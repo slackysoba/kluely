@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   AnimatePresence,
   LayoutGroup,
@@ -28,6 +28,44 @@ const DONATION_URL = "https://buy.stripe.com/14A5kEg8HeQs1MrdLE28800";
 
 // One id per magic-motion element, so framer glides them between layouts.
 const ORB_ID = "record-orb";
+
+// Rolling window for the end-to-end median measured client-side.
+const E2E_WINDOW = 50;
+
+// Info-tooltip copy for each sidebar latency metric.
+const METRIC_INFO = {
+  endToEnd:
+    "Time from when you stop speaking to the Klingon answer appearing on " +
+    "screen. Includes transcription, the language model generating the " +
+    "Klingon, and rendering.",
+  wordEmission:
+    "Median time from when a word finishes in your audio to when it appears " +
+    "as transcribed text, measured in the browser. This uses AssemblyAI's " +
+    "own metric definition, but measured end-to-end — so it sits on top of " +
+    "AssemblyAI's ~150ms server-side figure by the amount of network " +
+    "round-trip and client buffering.",
+  turnDetection:
+    "Time from when you stop speaking to when AssemblyAI signals the turn is " +
+    "complete (end_of_turn). Reflects Universal-Streaming's endpointing and " +
+    "turn-detection speed.",
+} as const;
+
+/** Rounded median (p50) of a sample window, or null when it's empty. */
+function median(samples: number[]): number | null {
+  const n = samples.length;
+  if (n === 0) {
+    return null;
+  }
+  const sorted = [...samples].sort((a, b) => a - b);
+  const mid = Math.floor(n / 2);
+  const value = n % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+  return Math.round(value);
+}
+
+/** Formats a latency reading for the rail, dashing out the empty state. */
+function formatLatency(ms: number | null): string {
+  return ms !== null ? `${ms}ms` : "—";
+}
 
 interface AnswerPayload {
   english: string;
@@ -196,6 +234,101 @@ function RailStat({ label, value }: { label: string; value: string }) {
   );
 }
 
+/**
+ * A small "i" affordance that reveals a metric's description. Opens on hover
+ * and keyboard focus (desktop) and on tap (touch, where hover never fires),
+ * and carries an aria-label so it's reachable and named for screen readers.
+ */
+function MetricInfo({
+  label,
+  description,
+}: {
+  label: string;
+  description: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const wrapRef = useRef<HTMLSpanElement>(null);
+  const tooltipId = useId();
+
+  // While open, a tap or click anywhere outside dismisses it — the only way to
+  // close the pinned-open state on touch, where there's no pointer-leave.
+  useEffect(() => {
+    if (!open) {
+      return;
+    }
+    const onDocPointer = (event: PointerEvent) => {
+      if (wrapRef.current && !wrapRef.current.contains(event.target as Node)) {
+        setOpen(false);
+      }
+    };
+    document.addEventListener("pointerdown", onDocPointer);
+    return () => document.removeEventListener("pointerdown", onDocPointer);
+  }, [open]);
+
+  return (
+    <span ref={wrapRef} className="relative inline-flex">
+      <button
+        type="button"
+        aria-label={label}
+        aria-expanded={open}
+        aria-describedby={open ? tooltipId : undefined}
+        // Touch has no hover: toggle on tap and suppress the emulated mouse
+        // events (which would otherwise immediately reopen/close it).
+        onPointerDown={(event) => {
+          if (event.pointerType !== "mouse") {
+            event.preventDefault();
+            setOpen((prev) => !prev);
+          }
+        }}
+        onMouseEnter={() => setOpen(true)}
+        onMouseLeave={() => setOpen(false)}
+        onFocus={() => setOpen(true)}
+        onBlur={() => setOpen(false)}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            setOpen(false);
+          }
+        }}
+        className="flex h-3.5 w-3.5 items-center justify-center rounded-full border border-line font-serif text-[9px] normal-case italic leading-none text-faint transition-colors hover:border-accent/70 hover:text-foreground focus-visible:border-accent focus-visible:text-foreground"
+      >
+        i
+      </button>
+      {open && (
+        <span
+          role="tooltip"
+          id={tooltipId}
+          className="absolute left-full top-1/2 z-30 ml-2 w-48 -translate-y-1/2 rounded-lg border border-line bg-surface px-3 py-2 text-left text-[11px] font-normal normal-case not-italic leading-4 tracking-normal text-muted shadow-xl"
+        >
+          {description}
+        </span>
+      )}
+    </span>
+  );
+}
+
+/** A rail latency metric: name on top, number beneath, with an info tooltip. */
+function MetricStat({
+  name,
+  value,
+  description,
+}: {
+  name: string;
+  value: string;
+  description: string;
+}) {
+  return (
+    <div className="flex w-full flex-col items-center gap-1">
+      <span className="flex items-center gap-1 text-center text-[10px] uppercase leading-tight tracking-[0.12em] text-faint">
+        {name}
+        <MetricInfo label={`${name} — what this measures`} description={description} />
+      </span>
+      <span className="font-mono text-sm tabular-nums text-foreground">
+        {value}
+      </span>
+    </div>
+  );
+}
+
 /** Designed panel for error and guidance states. */
 function StatePanel({
   title,
@@ -251,13 +384,21 @@ export default function Home() {
   const answerAbortRef = useRef<AbortController | null>(null);
   const sessionStartRef = useRef<number | null>(null);
   const historyIdRef = useRef(0);
+  // End-to-end latency spans the stream (end_of_turn) and the DOM (answer
+  // painted), so it's measured here rather than in the stream: the wall clock
+  // when the last final turn fired, plus its rolling sample window.
+  const turnEndAtRef = useRef<number | null>(null);
+  const e2eSamplesRef = useRef<number[]>([]);
 
   const [mode, setMode] = useState<CaptureMode>("practice");
   const [running, setRunning] = useState(false);
   const [starting, setStarting] = useState(false);
   const [currentQuestion, setCurrentQuestion] = useState("");
   const [partial, setPartial] = useState("");
-  const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  // Three rolling-median latency readouts shown in the recording rail.
+  const [endToEndMs, setEndToEndMs] = useState<number | null>(null);
+  const [wordEmissionMs, setWordEmissionMs] = useState<number | null>(null);
+  const [turnDetectionMs, setTurnDetectionMs] = useState<number | null>(null);
   const [elapsedMs, setElapsedMs] = useState(0);
   const [sessionError, setSessionError] = useState<SessionErrorKind | null>(
     null
@@ -294,6 +435,30 @@ export default function Home() {
     const id = window.setInterval(tick, 250);
     return () => window.clearInterval(id);
   }, [running]);
+
+  // Close the end-to-end loop: once an answer settles, measure from the
+  // end_of_turn that requested it to the frame that paints the Klingon. The
+  // rAF fires after the browser has committed the answer to the screen, so the
+  // sample includes render — not just the moment state was set.
+  useEffect(() => {
+    if (!answer) {
+      return;
+    }
+    const startedAt = turnEndAtRef.current;
+    if (startedAt === null) {
+      return;
+    }
+    turnEndAtRef.current = null;
+    const raf = requestAnimationFrame(() => {
+      const samples = e2eSamplesRef.current;
+      samples.push(performance.now() - startedAt);
+      if (samples.length > E2E_WINDOW) {
+        samples.shift();
+      }
+      setEndToEndMs(median(samples));
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [answer]);
 
   // Move the settled answer (and its question) into the history log. Newest
   // on top; a no-op when there's nothing settled yet.
@@ -387,7 +552,11 @@ export default function Home() {
     archiveCurrent();
     setCurrentQuestion("");
     setPartial("");
-    setLatencyMs(null);
+    setEndToEndMs(null);
+    setWordEmissionMs(null);
+    setTurnDetectionMs(null);
+    turnEndAtRef.current = null;
+    e2eSamplesRef.current = [];
     setElapsedMs(0);
     setAnswer(null);
     setAnswerError(null);
@@ -395,10 +564,14 @@ export default function Home() {
 
     const stream = new AssemblyAIStream({
       onPartialTranscript: (turn) => setPartial(turn.transcript),
-      onLatency: (p50) => setLatencyMs(p50),
+      onWordEmissionLatency: (p50) => setWordEmissionMs(p50),
+      onTurnDetectionLatency: (p50) => setTurnDetectionMs(p50),
       onFinalTranscript: (turn) => {
         setPartial("");
         if (turn.transcript) {
+          // Anchor the end-to-end clock the instant the turn finalizes; the
+          // paint effect above stops it when this turn's answer renders.
+          turnEndAtRef.current = performance.now();
           // The previous answer becomes history; this turn takes the stage.
           archiveCurrent();
           setCurrentQuestion(turn.transcript);
@@ -598,11 +771,24 @@ export default function Home() {
 
                   <div className="flex w-full flex-col items-center gap-4 border-t border-line/70 pt-4">
                     <RailStat label="Timer" value={formatElapsed(elapsedMs)} />
-                    <RailStat
-                      label="Transcription · p50"
-                      value={latencyMs !== null ? `${latencyMs}ms` : "—"}
-                    />
-                    <div className="flex items-center gap-1.5">
+                    <div className="flex w-full flex-col items-center gap-4 border-t border-line/70 pt-4">
+                      <MetricStat
+                        name="End-to-end"
+                        value={formatLatency(endToEndMs)}
+                        description={METRIC_INFO.endToEnd}
+                      />
+                      <MetricStat
+                        name="Word emission"
+                        value={formatLatency(wordEmissionMs)}
+                        description={METRIC_INFO.wordEmission}
+                      />
+                      <MetricStat
+                        name="Turn detection"
+                        value={formatLatency(turnDetectionMs)}
+                        description={METRIC_INFO.turnDetection}
+                      />
+                    </div>
+                    <div className="flex items-center gap-1.5 border-t border-line/70 pt-4 w-full justify-center">
                       <span
                         aria-hidden="true"
                         className={`h-1.5 w-1.5 rounded-full ${
@@ -818,28 +1004,17 @@ export default function Home() {
                 →
               </span>
             </a>
-            <span className="flex items-center gap-3">
-              <a
-                href="https://www.assemblyai.com"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-muted transition-colors hover:text-foreground"
-              >
-                Powered by AssemblyAI
-              </a>
-              <span aria-hidden="true" className="text-faint">
-                ·
-              </span>
-              <span
-                className="flex items-center gap-1.5"
-                title="Transcription latency — rolling median (p50): time from audio sent to the word appearing in a transcript"
-              >
-                <span className="text-faint">p50</span>
-                <span className="font-mono tabular-nums">
-                  {latencyMs !== null ? `${latencyMs} ms` : "— ms"}
-                </span>
-              </span>
-            </span>
+            {/* Balances the status readout on the left: credit sits flush to
+                the footer's right edge on desktop, centered under the donation
+                line on mobile. */}
+            <a
+              href="https://www.assemblyai.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-muted transition-colors hover:text-foreground"
+            >
+              Powered by AssemblyAI
+            </a>
           </span>
         </div>
       </footer>
