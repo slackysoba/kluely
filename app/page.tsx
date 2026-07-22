@@ -2,7 +2,13 @@
 
 import { useCallback, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
-import { AudioCapture, MicrophonePermissionError } from "@/lib/audio-capture";
+import {
+  AudioCapture,
+  CaptureCancelledError,
+  DisplayCaptureUnsupportedError,
+  MicrophonePermissionError,
+  TabAudioUnavailableError,
+} from "@/lib/audio-capture";
 import {
   AssemblyAIStream,
   SessionCapacityError,
@@ -19,7 +25,14 @@ interface AnswerPayload {
   backTranslation: string;
 }
 
-type SessionErrorKind = "mic-denied" | "connection" | "busy";
+type CaptureMode = "practice" | "live";
+
+type SessionErrorKind =
+  | "mic-denied"
+  | "connection"
+  | "busy"
+  | "tab-audio"
+  | "unsupported";
 
 interface AnswerError {
   kind: "network" | "api" | "rate-limited";
@@ -116,6 +129,7 @@ export default function Home() {
   const streamRef = useRef<AssemblyAIStream | null>(null);
   const answerAbortRef = useRef<AbortController | null>(null);
 
+  const [mode, setMode] = useState<CaptureMode>("practice");
   const [running, setRunning] = useState(false);
   const [starting, setStarting] = useState(false);
   const [finals, setFinals] = useState<string[]>([]);
@@ -222,16 +236,35 @@ export default function Home() {
     captureRef.current = capture;
 
     try {
+      // Acquire the audio source first: if the user cancels the picker or
+      // denies the mic, no streaming session (and no demo slot) is spent.
+      await capture.start(
+        (chunk) => {
+          stream.sendAudio(chunk);
+          const level = chunkLevel(chunk);
+          setLevels((prev) => [...prev.slice(1), level]);
+        },
+        {
+          source: mode === "live" ? "tab" : "microphone",
+          // Chrome's "Stop sharing" bar (or a vanished mic) ends the track;
+          // terminate the streaming session properly instead of leaking it.
+          onSourceEnded: () => void stopPipeline(),
+        }
+      );
       await stream.start();
-      await capture.start((chunk) => {
-        stream.sendAudio(chunk);
-        const level = chunkLevel(chunk);
-        setLevels((prev) => [...prev.slice(1), level]);
-      });
       setRunning(true);
     } catch (err) {
+      if (err instanceof CaptureCancelledError) {
+        // Dismissing the picker is a decision, not a failure.
+        await stopPipeline();
+        return;
+      }
       if (err instanceof MicrophonePermissionError) {
         setSessionError("mic-denied");
+      } else if (err instanceof TabAudioUnavailableError) {
+        setSessionError("tab-audio");
+      } else if (err instanceof DisplayCaptureUnsupportedError) {
+        setSessionError("unsupported");
       } else if (err instanceof SessionCapacityError) {
         setSessionError("busy");
       } else {
@@ -242,7 +275,7 @@ export default function Home() {
     } finally {
       setStarting(false);
     }
-  }, [requestAnswer, stopPipeline]);
+  }, [mode, requestAnswer, stopPipeline]);
 
   const toggleRecording = () => {
     if (running) {
@@ -256,6 +289,17 @@ export default function Home() {
     if (answerError) {
       void requestAnswer(answerError.question);
     }
+  };
+
+  const switchMode = (next: CaptureMode) => {
+    if (next === mode) {
+      return;
+    }
+    if (running || starting) {
+      void stopPipeline();
+    }
+    setSessionError(null);
+    setMode(next);
   };
 
   const connectionLabel = starting
@@ -286,24 +330,38 @@ export default function Home() {
           <div
             className="mt-1 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs"
             role="group"
-            aria-label="Listening mode"
+            aria-label="Capture mode"
           >
             <button
               type="button"
-              aria-pressed="true"
-              className="rounded-full bg-background px-3.5 py-1 font-medium text-foreground"
+              aria-pressed={mode === "practice"}
+              onClick={() => switchMode("practice")}
+              className={`rounded-full px-3.5 py-1 transition-colors ${
+                mode === "practice"
+                  ? "bg-background font-medium text-foreground"
+                  : "text-muted hover:text-foreground"
+              }`}
             >
               Practice
             </button>
             <button
               type="button"
-              disabled
-              title="Meeting mode — capturing meeting audio — is coming soon"
-              className="cursor-not-allowed px-3.5 py-1 text-faint"
+              aria-pressed={mode === "live"}
+              onClick={() => switchMode("live")}
+              className={`rounded-full px-3.5 py-1 transition-colors ${
+                mode === "live"
+                  ? "bg-background font-medium text-foreground"
+                  : "text-muted hover:text-foreground"
+              }`}
             >
-              Meeting
+              Live
             </button>
           </div>
+          <p className="text-xs text-faint">
+            {mode === "practice"
+              ? "Uses your microphone — answering what you say."
+              : "Captures a browser tab — answering what they ask."}
+          </p>
         </header>
 
         {/* Primary action */}
@@ -366,6 +424,40 @@ export default function Home() {
                   onAction={() => void startPipeline()}
                 />
               </motion.div>
+            ) : sessionError === "tab-audio" ? (
+              <motion.div
+                key="tab-audio"
+                initial={enter}
+                animate={entered}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.3 }}
+              >
+                <StatePanel
+                  alert
+                  title="No tab audio was shared"
+                  body={
+                    'Pick the meeting tab in Chrome’s picker and tick "Also share tab audio" at the bottom — sharing a window or screen won’t carry sound.'
+                  }
+                  actionLabel="Share again"
+                  onAction={() => void startPipeline()}
+                />
+              </motion.div>
+            ) : sessionError === "unsupported" ? (
+              <motion.div
+                key="unsupported"
+                initial={enter}
+                animate={entered}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.3 }}
+              >
+                <StatePanel
+                  alert
+                  title="Tab capture isn't supported here"
+                  body="This browser can't capture tab audio. Use Chrome or Edge on desktop, or switch to Practice mode and use your microphone."
+                  actionLabel="Use Practice mode"
+                  onAction={() => switchMode("practice")}
+                />
+              </motion.div>
             ) : sessionError === "busy" ? (
               <motion.div
                 key="busy"
@@ -406,16 +498,31 @@ export default function Home() {
                 transition={{ duration: 0.3 }}
                 className="flex flex-col items-center gap-2"
               >
-                <p className="text-sm text-muted">
-                  Press the button and speak the interviewer&rsquo;s question
-                  aloud.
-                </p>
-                <p className="text-sm text-faint">
-                  Try{" "}
-                  <span className="text-muted">
-                    &ldquo;Where do you see yourself in five years?&rdquo;
-                  </span>
-                </p>
+                {mode === "practice" ? (
+                  <>
+                    <p className="text-sm text-muted">
+                      Press the button and speak the interviewer&rsquo;s
+                      question aloud.
+                    </p>
+                    <p className="text-sm text-faint">
+                      Try{" "}
+                      <span className="text-muted">
+                        &ldquo;Where do you see yourself in five years?&rdquo;
+                      </span>
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    <p className="text-sm text-muted">
+                      Press the button, pick the meeting tab, and tick
+                      &ldquo;Also share tab audio.&rdquo;
+                    </p>
+                    <p className="text-sm text-faint">
+                      Kluely listens to that tab and answers each question it
+                      hears.
+                    </p>
+                  </>
+                )}
               </motion.div>
             ) : (
               <motion.div
@@ -440,7 +547,9 @@ export default function Home() {
                 ) : (
                   <p className="text-sm text-faint">
                     {running
-                      ? "Listening — speak the question."
+                      ? mode === "practice"
+                        ? "Listening — speak the question."
+                        : "Listening to the shared tab."
                       : "Connecting to transcription…"}
                   </p>
                 )}
@@ -572,7 +681,7 @@ export default function Home() {
                 running ? "bg-accent" : starting ? "bg-muted" : "bg-faint"
               }`}
             />
-            Practice · {connectionLabel}
+            {mode === "practice" ? "Practice" : "Live"} · {connectionLabel}
           </span>
           <span className="font-mono tabular-nums">
             {latencyMs !== null ? `${latencyMs} ms` : "— ms"}

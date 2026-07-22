@@ -22,9 +22,9 @@ Five stages, two external services:
 
 ```
 ┌────────────┐  Float32 @ native rate   ┌─────────────────────┐
-│ Microphone │ ───────────────────────► │ AudioWorklet        │
-└────────────┘                          │ downmix → 16 kHz    │
-                                        │ → PCM16, 50 ms      │
+│ Mic or tab │ ───────────────────────► │ AudioWorklet        │
+│ audio      │                          │ downmix → 16 kHz    │
+└────────────┘                          │ → PCM16, 50 ms      │
                                         └──────────┬──────────┘
                                                    │ ArrayBuffer chunks
                                                    ▼
@@ -46,11 +46,15 @@ Five stages, two external services:
                                             └─────────────────────┘
 ```
 
-1. **Capture** — an `AudioWorkletProcessor` receives Float32 audio at the
-   browser's native sample rate, downmixes to mono, resamples to 16 kHz
-   with linear interpolation (continuous across render quanta), converts
-   to 16-bit PCM, and posts 50 ms chunks (800 samples) to the main thread
-   as transferred `ArrayBuffer`s.
+1. **Capture** — audio comes from the microphone (Practice mode,
+   `getUserMedia`) or a shared browser tab (Live mode,
+   `getDisplayMedia`; the video track is requested because Chrome
+   requires it, then immediately discarded). Either way an
+   `AudioWorkletProcessor` receives Float32 audio at the source rate
+   (tab audio is typically 48 kHz stereo), downmixes to mono, resamples
+   to 16 kHz with linear interpolation (continuous across render
+   quanta), converts to 16-bit PCM, and posts 50 ms chunks (800 samples)
+   to the main thread as transferred `ArrayBuffer`s.
 2. **Transcribe** — chunks stream over a WebSocket to AssemblyAI's v3
    Universal-Streaming endpoint, authenticated with a short-lived token.
 3. **Detect** — the client separates partial transcripts from finalized
@@ -133,11 +137,11 @@ as the honest one — it includes your actual network.
   no-invented-vocabulary rule) and a strict response schema, but no
   fluent speaker has reviewed the output. Assume errors a Klingon
   Language Institute member would find embarrassing.
-- **Live/meeting capture is not really here.** The Meeting mode toggle
-  is a disabled stub. Practice mode uses `getUserMedia` (your
-  microphone). A future meeting mode built on `getDisplayMedia` would be
-  Chromium-only and captures a browser tab's audio — not Zoom, not any
-  native desktop app.
+- **Live mode captures a browser tab, nothing else.** It is built on
+  `getDisplayMedia`, which only carries tab audio on Chromium browsers,
+  and only when the user ticks "Also share tab audio" in the picker. It
+  cannot hear Zoom, Teams, or any native desktop app — browser-tab
+  meetings only.
 - **No speaker diarization in the live stream.** Everyone within
   microphone range is one undifferentiated speaker; the interviewer and
   the candidate are the same voice as far as the pipeline is concerned.
