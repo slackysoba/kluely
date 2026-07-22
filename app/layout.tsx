@@ -1,16 +1,19 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Space_Grotesk, Space_Mono } from "next/font/google";
 import localFont from "next/font/local";
 import "./globals.css";
 
-const geistSans = Geist({
+// Trial font swap (Geist → Space Grotesk/Mono). The CSS variable names are
+// kept so the rest of the app is untouched; revert this file to undo.
+const uiSans = Space_Grotesk({
   variable: "--font-geist-sans",
   subsets: ["latin"],
 });
 
-const geistMono = Geist_Mono({
+const uiMono = Space_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
+  weight: ["400", "700"],
 });
 
 // Klingon pIqaD (CSUR PUA U+F8D0–U+F8FF). See public/fonts/LICENSE.
@@ -48,7 +51,7 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} ${piqad.variable} h-full antialiased`}
+      className={`${uiSans.variable} ${uiMono.variable} ${piqad.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">{children}</body>
     </html>

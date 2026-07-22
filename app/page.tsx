@@ -1,7 +1,12 @@
 "use client";
 
-import { useCallback, useRef, useState } from "react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
+import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  AnimatePresence,
+  LayoutGroup,
+  motion,
+  useReducedMotion,
+} from "framer-motion";
 import {
   AudioCapture,
   CaptureCancelledError,
@@ -13,18 +18,27 @@ import {
   AssemblyAIStream,
   SessionCapacityError,
 } from "@/lib/assemblyai-stream";
-import Logo from "@/components/Logo";
+import Image from "next/image";
+import Wordmark from "@/components/Wordmark";
 
 const WAVE_BARS = 40;
 const FLAT_LEVELS = new Array<number>(WAVE_BARS).fill(0);
 
 const DONATION_URL = "https://buy.stripe.com/14A5kEg8HeQs1MrdLE28800";
 
+// One id per magic-motion element, so framer glides them between layouts.
+const ORB_ID = "record-orb";
+
 interface AnswerPayload {
   english: string;
   klingon: string;
   pIqaD: string;
   backTranslation: string;
+}
+
+interface HistoryEntry extends AnswerPayload {
+  id: string;
+  question: string;
 }
 
 type CaptureMode = "practice" | "live";
@@ -67,11 +81,46 @@ function chunkLevel(chunk: ArrayBuffer): number {
   return Math.min(1, Math.sqrt(rms) * 1.8);
 }
 
-function Waveform({ levels, active }: { levels: number[]; active: boolean }) {
+function formatElapsed(ms: number): string {
+  const total = Math.floor(ms / 1000);
+  const m = Math.floor(total / 60);
+  const s = total % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+/** Compact amplitude meter for the left rail, driven by real mic levels. */
+function RailWaveform({ levels, active }: { levels: number[]; active: boolean }) {
+  const bars = levels.slice(-24);
   return (
     <div
       aria-hidden="true"
-      className={`flex h-12 items-center justify-center gap-[3px] transition-opacity duration-500 ${
+      className={`flex h-9 items-center justify-center gap-[2px] transition-opacity duration-500 ${
+        active ? "opacity-100" : "opacity-30"
+      }`}
+    >
+      {bars.map((level, i) => (
+        <span
+          key={i}
+          className="wave-bar w-[2px] rounded-full bg-foreground/60"
+          style={{ height: `${3 + level * 26}px` }}
+        />
+      ))}
+    </div>
+  );
+}
+
+/** Wide amplitude meter for the centered idle state. */
+function CenterWaveform({
+  levels,
+  active,
+}: {
+  levels: number[];
+  active: boolean;
+}) {
+  return (
+    <div
+      aria-hidden="true"
+      className={`flex h-10 items-center justify-center gap-[3px] transition-opacity duration-500 ${
         active ? "opacity-100" : "opacity-30"
       }`}
     >
@@ -79,9 +128,64 @@ function Waveform({ levels, active }: { levels: number[]; active: boolean }) {
         <span
           key={i}
           className="wave-bar w-[3px] rounded-full bg-foreground/50"
-          style={{ height: `${4 + level * 40}px` }}
+          style={{ height: `${4 + level * 32}px` }}
         />
       ))}
+    </div>
+  );
+}
+
+/** The record orb. Same layoutId in both layouts, so it swoops between them. */
+function RecordOrb({
+  variant,
+  running,
+  starting,
+  onClick,
+  transition,
+}: {
+  variant: "center" | "rail";
+  running: boolean;
+  starting: boolean;
+  onClick: () => void;
+  transition: object;
+}) {
+  const isCenter = variant === "center";
+  return (
+    <motion.button
+      layoutId={ORB_ID}
+      transition={transition}
+      type="button"
+      onClick={onClick}
+      disabled={starting}
+      aria-pressed={running}
+      aria-label={running ? "Stop listening" : "Start listening"}
+      className={`relative flex items-center justify-center rounded-full border transition-colors duration-300 disabled:opacity-60 ${
+        isCenter ? "h-24 w-24" : "h-16 w-16"
+      } ${
+        running
+          ? "recording-pulse border-accent bg-accent"
+          : "border-line bg-surface hover:border-accent/70"
+      }`}
+    >
+      <span
+        className={`${isCenter ? "h-7 w-7" : "h-5 w-5"} ${
+          running ? "rounded-[6px] bg-background" : "rounded-full bg-accent"
+        }`}
+      />
+    </motion.button>
+  );
+}
+
+/** Labelled numeric readout for the rail (timer, latency). */
+function RailStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="flex flex-col items-center gap-0.5">
+      <span className="font-mono text-sm tabular-nums text-foreground">
+        {value}
+      </span>
+      <span className="text-[10px] uppercase tracking-[0.16em] text-faint">
+        {label}
+      </span>
     </div>
   );
 }
@@ -103,7 +207,7 @@ function StatePanel({
   return (
     <div
       role={alert ? "alert" : undefined}
-      className="mx-auto flex w-full max-w-md flex-col items-center gap-3 rounded-2xl border border-line bg-surface/60 px-8 py-8 text-center"
+      className="flex w-full max-w-md flex-col items-center gap-3 rounded-2xl border border-line bg-surface/60 px-8 py-8 text-center"
     >
       <span
         aria-hidden="true"
@@ -124,19 +228,31 @@ function StatePanel({
   );
 }
 
+/** Small caps label used across the stage. */
+function StageLabel({ children }: { children: React.ReactNode }) {
+  return (
+    <span className="text-[10px] font-medium uppercase tracking-[0.18em] text-faint">
+      {children}
+    </span>
+  );
+}
+
 export default function Home() {
   const reducedMotion = useReducedMotion();
 
   const captureRef = useRef<AudioCapture | null>(null);
   const streamRef = useRef<AssemblyAIStream | null>(null);
   const answerAbortRef = useRef<AbortController | null>(null);
+  const sessionStartRef = useRef<number | null>(null);
+  const historyIdRef = useRef(0);
 
   const [mode, setMode] = useState<CaptureMode>("practice");
   const [running, setRunning] = useState(false);
   const [starting, setStarting] = useState(false);
-  const [finals, setFinals] = useState<string[]>([]);
+  const [currentQuestion, setCurrentQuestion] = useState("");
   const [partial, setPartial] = useState("");
   const [latencyMs, setLatencyMs] = useState<number | null>(null);
+  const [elapsedMs, setElapsedMs] = useState(0);
   const [sessionError, setSessionError] = useState<SessionErrorKind | null>(
     null
   );
@@ -145,6 +261,48 @@ export default function Home() {
   const [answer, setAnswer] = useState<AnswerPayload | null>(null);
   const [answerLoading, setAnswerLoading] = useState(false);
   const [answerError, setAnswerError] = useState<AnswerError | null>(null);
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+
+  // Mirror the live exchange into refs so archiving reads the latest values
+  // without threading them through every callback's dependency list.
+  const answerRef = useRef<AnswerPayload | null>(null);
+  const questionRef = useRef("");
+  useEffect(() => {
+    answerRef.current = answer;
+  }, [answer]);
+  useEffect(() => {
+    questionRef.current = currentQuestion;
+  }, [currentQuestion]);
+
+  // Tick the session timer while listening; freezes when the session ends.
+  useEffect(() => {
+    if (!running) {
+      return;
+    }
+    const tick = () => {
+      if (sessionStartRef.current !== null) {
+        setElapsedMs(Date.now() - sessionStartRef.current);
+      }
+    };
+    tick();
+    const id = window.setInterval(tick, 250);
+    return () => window.clearInterval(id);
+  }, [running]);
+
+  // Move the settled answer (and its question) into the history log. Newest
+  // on top; a no-op when there's nothing settled yet.
+  const archiveCurrent = useCallback(() => {
+    const settled = answerRef.current;
+    const question = questionRef.current;
+    if (settled && question) {
+      const entry: HistoryEntry = {
+        id: `h${historyIdRef.current++}`,
+        question,
+        ...settled,
+      };
+      setHistory((prev) => [entry, ...prev]);
+    }
+  }, []);
 
   // Fired only for finalized turns (end_of_turn: true) — never partials.
   // A newer final cancels any in-flight request instead of racing it.
@@ -197,8 +355,16 @@ export default function Home() {
     const stream = streamRef.current;
     captureRef.current = null;
     streamRef.current = null;
+    // Preserve the last exchange in history as we return to idle.
+    archiveCurrent();
+    answerAbortRef.current?.abort();
+    answerAbortRef.current = null;
     setRunning(false);
     setLevels(FLAT_LEVELS);
+    setCurrentQuestion("");
+    setPartial("");
+    setAnswer(null);
+    setAnswerLoading(false);
     // Stop the mic first so no audio is sent while the session terminates.
     if (capture) {
       await capture.stop();
@@ -206,16 +372,20 @@ export default function Home() {
     if (stream) {
       await stream.stop();
     }
-  }, []);
+  }, [archiveCurrent]);
 
   const startPipeline = useCallback(async () => {
     setStarting(true);
     setSessionError(null);
-    setFinals([]);
+    // Keep history; clear only the live turn.
+    archiveCurrent();
+    setCurrentQuestion("");
     setPartial("");
     setLatencyMs(null);
+    setElapsedMs(0);
     setAnswer(null);
     setAnswerError(null);
+    setAnswerLoading(false);
 
     const stream = new AssemblyAIStream({
       onPartialTranscript: (turn) => setPartial(turn.transcript),
@@ -223,7 +393,10 @@ export default function Home() {
         setPartial("");
         setLatencyMs(latency);
         if (turn.transcript) {
-          setFinals((prev) => [...prev, turn.transcript]);
+          // The previous answer becomes history; this turn takes the stage.
+          archiveCurrent();
+          setCurrentQuestion(turn.transcript);
+          setAnswer(null);
           void requestAnswer(turn.transcript);
         }
       },
@@ -254,6 +427,8 @@ export default function Home() {
         }
       );
       await stream.start();
+      sessionStartRef.current = Date.now();
+      setElapsedMs(0);
       setRunning(true);
     } catch (err) {
       if (err instanceof CaptureCancelledError) {
@@ -277,7 +452,7 @@ export default function Home() {
     } finally {
       setStarting(false);
     }
-  }, [mode, requestAnswer, stopPipeline]);
+  }, [mode, requestAnswer, stopPipeline, archiveCurrent]);
 
   const toggleRecording = () => {
     if (running) {
@@ -304,26 +479,44 @@ export default function Home() {
     setMode(next);
   };
 
+  const active = running || starting;
   const connectionLabel = starting
     ? "Connecting"
     : running
       ? "Listening"
       : "Offline";
+  const heard = partial || currentQuestion;
 
-  const hasTranscript = finals.length > 0 || partial.length > 0;
-  const firstLoad =
-    !running && !starting && !hasTranscript && !sessionError && !answer;
-  const enter = reducedMotion
-    ? { opacity: 0 }
-    : ({ opacity: 0, y: 14 } as const);
-  const entered = reducedMotion
-    ? { opacity: 1 }
-    : ({ opacity: 1, y: 0 } as const);
+  // Motion vocabulary. Reduced motion collapses every glide to a plain fade.
+  const swoop = reducedMotion
+    ? { duration: 0 }
+    : { duration: 0.4, ease: [0.22, 1, 0.36, 1] as const };
+  const fade = reducedMotion
+    ? {
+        initial: { opacity: 0 },
+        animate: { opacity: 1 },
+        exit: { opacity: 0 },
+        transition: { duration: 0.2 },
+      }
+    : {
+        initial: { opacity: 0, y: 8 },
+        animate: { opacity: 1, y: 0 },
+        exit: { opacity: 0 },
+        transition: { duration: 0.32, ease: [0.22, 1, 0.36, 1] as const },
+      };
+
+  const sessionErrorPanel = sessionError && (
+    <SessionErrorPanel
+      kind={sessionError}
+      onRetry={() => void startPipeline()}
+      onUsePractice={() => switchMode("practice")}
+    />
+  );
 
   return (
     <div className="relative flex min-h-screen flex-col">
       {/* Donation aside, top right */}
-      <div className="group absolute right-6 top-6 text-xs">
+      <div className="group absolute right-6 top-6 z-10 text-xs">
         <a
           href={DONATION_URL}
           target="_blank"
@@ -347,360 +540,248 @@ export default function Home() {
           Donations cover API costs.
         </span>
       </div>
-      <main className="mx-auto flex w-full max-w-[720px] flex-1 flex-col items-center gap-12 px-6 pb-24 pt-20">
-        <header className="flex flex-col items-center gap-4 text-center">
-          <h1>
-            <Logo className="h-10 w-auto" />
-          </h1>
-          <p className="text-sm text-muted">Interview coaching for Klingons.</p>
-          {/* Mode: makes the capture scope explicit */}
-          <div
-            className="mt-1 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs"
-            role="group"
-            aria-label="Capture mode"
-          >
-            <button
-              type="button"
-              aria-pressed={mode === "practice"}
-              onClick={() => switchMode("practice")}
-              className={`rounded-full px-3.5 py-1 transition-colors ${
-                mode === "practice"
-                  ? "bg-background font-medium text-foreground"
-                  : "text-muted hover:text-foreground"
-              }`}
-            >
-              Practice
-            </button>
-            <button
-              type="button"
-              aria-pressed={mode === "live"}
-              onClick={() => switchMode("live")}
-              className={`rounded-full px-3.5 py-1 transition-colors ${
-                mode === "live"
-                  ? "bg-background font-medium text-foreground"
-                  : "text-muted hover:text-foreground"
-              }`}
-            >
-              Live
-            </button>
-          </div>
-          <p className="text-xs text-faint">
-            {mode === "practice"
-              ? "Uses your microphone — answering what you say."
-              : "Captures a browser tab — answering what they ask."}
-          </p>
-        </header>
 
-        {/* Primary action */}
-        <div className="flex flex-col items-center gap-6">
-          <div className="relative">
-            <AnimatePresence>
-              {running && (
-                <motion.span
-                  aria-hidden="true"
-                  initial={{ opacity: 0 }}
-                  animate={{ opacity: 1 }}
-                  exit={{ opacity: 0 }}
-                  transition={{ duration: 0.6 }}
-                  className="absolute -inset-8 rounded-full bg-accent/15 blur-2xl"
+      <main className="flex w-full flex-1 flex-col px-6 pb-28 pt-8">
+        <LayoutGroup>
+          {active ? (
+            /* ---------- RECORDING: left rail + working stage ---------- */
+            <div className="mx-auto w-full max-w-[1040px]">
+              <motion.div
+                {...fade}
+                className="mb-8 flex items-center gap-2.5"
+                aria-label="Kluely"
+              >
+                <Image
+                  src="/logo.png"
+                  alt=""
+                  width={120}
+                  height={160}
+                  loading="eager"
+                  className="h-6 w-auto"
                 />
-              )}
-            </AnimatePresence>
-            <button
-            type="button"
-            onClick={toggleRecording}
-            disabled={starting}
-            aria-pressed={running}
-            aria-label={running ? "Stop listening" : "Start listening"}
-            className={`relative flex h-24 w-24 items-center justify-center rounded-full border transition-colors duration-300 disabled:opacity-60 ${
-              running
-                ? "recording-pulse border-accent bg-accent"
-                : "border-line bg-surface hover:border-accent/70"
-            }`}
-          >
-              {running ? (
-                <span className="h-7 w-7 rounded-[6px] bg-background" />
-              ) : (
-                <span className="h-7 w-7 rounded-full bg-accent" />
-              )}
-            </button>
-          </div>
-          <Waveform levels={levels} active={running} />
-        </div>
+                <Wordmark className="h-5 w-auto" />
+              </motion.div>
 
-        {/* Session state: first-load hint, errors, or live transcript */}
-        <section
-          aria-live="polite"
-          aria-label="Live transcript"
-          className="min-h-16 w-full text-center"
-        >
-          <AnimatePresence mode="wait">
-            {sessionError === "mic-denied" ? (
-              <motion.div
-                key="mic-denied"
-                initial={enter}
-                animate={entered}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.3 }}
-              >
-                <StatePanel
-                  alert
-                  title="Microphone access is blocked"
-                  body="Kluely needs to hear the question. Allow microphone access for this site in your browser's address bar, then try again."
-                  actionLabel="Try again"
-                  onAction={() => void startPipeline()}
-                />
-              </motion.div>
-            ) : sessionError === "tab-audio" ? (
-              <motion.div
-                key="tab-audio"
-                initial={enter}
-                animate={entered}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.3 }}
-              >
-                <StatePanel
-                  alert
-                  title="No tab audio was shared"
-                  body={
-                    'Pick the meeting tab in Chrome’s picker and tick "Also share tab audio" at the bottom — sharing a window or screen won’t carry sound.'
-                  }
-                  actionLabel="Share again"
-                  onAction={() => void startPipeline()}
-                />
-              </motion.div>
-            ) : sessionError === "unsupported" ? (
-              <motion.div
-                key="unsupported"
-                initial={enter}
-                animate={entered}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.3 }}
-              >
-                <StatePanel
-                  alert
-                  title="Tab capture isn't supported here"
-                  body="This browser can't capture tab audio. Use Chrome or Edge on desktop, or switch to Practice mode and use your microphone."
-                  actionLabel="Use Practice mode"
-                  onAction={() => switchMode("practice")}
-                />
-              </motion.div>
-            ) : sessionError === "busy" ? (
-              <motion.div
-                key="busy"
-                initial={enter}
-                animate={entered}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.3 }}
-              >
-                <StatePanel
-                  title="All demo slots are in use"
-                  body="Kluely limits simultaneous sessions to stay inside its API budget. Slots free up within a few minutes."
-                  actionLabel="Try again"
-                  onAction={() => void startPipeline()}
-                />
-              </motion.div>
-            ) : sessionError === "connection" ? (
-              <motion.div
-                key="connection-error"
-                initial={enter}
-                animate={entered}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.3 }}
-              >
-                <StatePanel
-                  alert
-                  title="Connection lost"
-                  body="The transcription session ended unexpectedly. Check your network and start again — nothing you said was lost."
-                  actionLabel="Reconnect"
-                  onAction={() => void startPipeline()}
-                />
-              </motion.div>
-            ) : firstLoad ? (
-              <motion.div
-                key="first-load"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.3 }}
-                className="flex flex-col items-center gap-2"
-              >
-                {mode === "practice" ? (
-                  <>
-                    <p className="text-sm text-muted">
-                      Press the button and speak the interviewer&rsquo;s
-                      question aloud.
-                    </p>
-                    <p className="text-sm text-faint">
-                      Try{" "}
-                      <span className="text-muted">
-                        &ldquo;Where do you see yourself in five years?&rdquo;
-                      </span>
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <p className="text-sm text-muted">
-                      Press the button, pick the meeting tab, and tick
-                      &ldquo;Also share tab audio.&rdquo;
-                    </p>
-                    <p className="text-sm text-faint">
-                      Kluely listens to that tab and answers each question it
-                      hears.
-                    </p>
-                  </>
-                )}
-              </motion.div>
-            ) : (
-              <motion.div
-                key="transcript"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.3 }}
-              >
-                {hasTranscript ? (
-                  <div className="flex flex-col gap-2">
-                    <span className="text-[11px] font-medium uppercase tracking-[0.18em] text-faint">
-                      Question
-                    </span>
-                    <p className="text-base leading-7 text-muted">
-                      {finals.join(" ")}
-                      {partial && (
-                        <span className="text-faint"> {partial}</span>
+              <div className="flex gap-6 md:gap-8">
+                <aside className="flex w-[130px] shrink-0 flex-col items-center gap-5 self-start rounded-2xl border border-line bg-surface/30 px-3 py-6">
+                  <div className="relative flex items-center justify-center">
+                    <AnimatePresence>
+                      {running && (
+                        <motion.span
+                          aria-hidden="true"
+                          initial={{ opacity: 0 }}
+                          animate={{ opacity: 1 }}
+                          exit={{ opacity: 0 }}
+                          transition={{ duration: 0.6 }}
+                          className="absolute -inset-4 rounded-full bg-accent/15 blur-2xl"
+                        />
                       )}
-                    </p>
+                    </AnimatePresence>
+                    <RecordOrb
+                      variant="rail"
+                      running={running}
+                      starting={starting}
+                      onClick={toggleRecording}
+                      transition={swoop}
+                    />
                   </div>
-                ) : (
-                  <p className="text-sm text-faint">
-                    {running
-                      ? mode === "practice"
-                        ? "Listening — speak the question."
-                        : "Listening to the shared tab."
-                      : "Connecting to transcription…"}
-                  </p>
-                )}
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </section>
 
-        {/* Answer */}
-        <section aria-label="Answer" className="w-full flex-1">
-          <AnimatePresence mode="wait">
-            {answerLoading ? (
-              <motion.div
-                key="thinking"
-                initial={enter}
-                animate={entered}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.3 }}
-                className="flex items-center justify-center gap-2 pt-6"
-                aria-label="Composing answer"
-              >
-                {[0, 1, 2].map((i) => (
-                  <span
-                    key={i}
-                    className="thinking-dot h-1.5 w-1.5 rounded-full bg-muted"
-                    style={{ animationDelay: `${i * 0.2}s` }}
+                  <RailWaveform levels={levels} active={running} />
+
+                  <div className="flex w-full flex-col items-center gap-4 border-t border-line/70 pt-4">
+                    <RailStat label="Timer" value={formatElapsed(elapsedMs)} />
+                    <RailStat
+                      label="Latency"
+                      value={latencyMs !== null ? `${latencyMs}ms` : "—"}
+                    />
+                    <div className="flex items-center gap-1.5">
+                      <span
+                        aria-hidden="true"
+                        className={`h-1.5 w-1.5 rounded-full ${
+                          running
+                            ? "bg-accent"
+                            : starting
+                              ? "bg-muted"
+                              : "bg-faint"
+                        }`}
+                      />
+                      <span className="text-[10px] uppercase tracking-[0.14em] text-faint">
+                        {mode}
+                      </span>
+                    </div>
+                  </div>
+                </aside>
+
+                <div
+                  className="flex min-w-0 flex-1 flex-col gap-6"
+                  aria-live="polite"
+                >
+                  {/* Heard strip */}
+                  <motion.div
+                    {...fade}
+                    className="flex flex-col gap-1.5 rounded-xl border border-line bg-surface/40 px-4 py-3"
+                  >
+                    <StageLabel>Heard</StageLabel>
+                    {heard ? (
+                      <p className="text-sm leading-6 text-muted">{heard}</p>
+                    ) : (
+                      <p className="text-sm italic leading-6 text-faint">
+                        {running
+                          ? mode === "practice"
+                            ? "Listening — speak the question."
+                            : "Listening to the shared tab."
+                          : "Connecting to transcription…"}
+                      </p>
+                    )}
+                  </motion.div>
+
+                  {/* Answer hero */}
+                  <motion.div {...fade} className="min-h-[168px]">
+                    <AnswerStage
+                      answer={answer}
+                      loading={answerLoading}
+                      error={answerError}
+                      onRetry={retryAnswer}
+                      fade={fade}
+                    />
+                  </motion.div>
+
+                  {/* History */}
+                  <motion.div {...fade}>
+                    <HistoryPanel entries={history} reducedMotion={!!reducedMotion} />
+                  </motion.div>
+                </div>
+              </div>
+            </div>
+          ) : (
+            /* ---------- IDLE: calm centered layout ---------- */
+            <div className="mx-auto flex w-full max-w-[720px] flex-col items-center gap-9 pt-6">
+              <header className="flex flex-col items-center gap-3 text-center">
+                <h1
+                  aria-label="Kluely"
+                  className="flex items-center gap-3 sm:gap-3.5"
+                >
+                  <Image
+                    src="/logo.png"
+                    alt=""
+                    width={120}
+                    height={160}
+                    loading="eager"
+                    className="h-9 w-auto sm:h-11"
                   />
-                ))}
-              </motion.div>
-            ) : answerError ? (
-              <motion.div
-                key="answer-error"
-                initial={enter}
-                animate={entered}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.3 }}
-                className="pt-6"
-              >
-                {answerError.kind === "rate-limited" ? (
-                  <StatePanel
-                    title="The demo is popular right now"
-                    body="Too many questions in the last minute. Give it a few seconds — your question is saved."
-                    actionLabel="Retry"
-                    onAction={retryAnswer}
+                  <Wordmark className="h-8 w-auto sm:h-10" />
+                </h1>
+                <p className="text-sm text-muted">
+                  Interview coaching for Klingons.
+                </p>
+                {/* Mode: makes the capture scope explicit */}
+                <div
+                  className="mt-2.5 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs"
+                  role="group"
+                  aria-label="Capture mode"
+                >
+                  <button
+                    type="button"
+                    aria-pressed={mode === "practice"}
+                    onClick={() => switchMode("practice")}
+                    className={`rounded-full px-3.5 py-1 transition-colors ${
+                      mode === "practice"
+                        ? "bg-background font-medium text-foreground"
+                        : "text-muted hover:text-foreground"
+                    }`}
+                  >
+                    Practice
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={mode === "live"}
+                    onClick={() => switchMode("live")}
+                    className={`rounded-full px-3.5 py-1 transition-colors ${
+                      mode === "live"
+                        ? "bg-background font-medium text-foreground"
+                        : "text-muted hover:text-foreground"
+                    }`}
+                  >
+                    Live
+                  </button>
+                </div>
+                <p className="text-xs text-faint">
+                  {mode === "practice"
+                    ? "Uses your microphone — answering what you say."
+                    : "Captures a browser tab — answering what they ask."}
+                </p>
+              </header>
+
+              <div className="flex flex-col items-center gap-5">
+                <div className="relative flex items-center justify-center">
+                  <RecordOrb
+                    variant="center"
+                    running={running}
+                    starting={starting}
+                    onClick={toggleRecording}
+                    transition={swoop}
                   />
-                ) : (
-                  <StatePanel
-                    alert
-                    title={
-                      answerError.kind === "network"
-                        ? "Couldn't reach the server"
-                        : "Couldn't compose an answer"
-                    }
-                    body={
-                      answerError.kind === "network"
-                        ? "The request didn't make it out. Check your connection — your question is saved."
-                        : "Something went wrong while generating the Klingon. Your question is saved, so just retry."
-                    }
-                    actionLabel="Retry"
-                    onAction={retryAnswer}
+                </div>
+                <CenterWaveform levels={levels} active={running} />
+              </div>
+
+              {/* Guidance / errors */}
+              <section
+                aria-live="polite"
+                className="flex min-h-16 w-full flex-col items-center text-center"
+              >
+                <AnimatePresence mode="wait">
+                  {sessionError ? (
+                    <motion.div key={`err-${sessionError}`} {...fade}>
+                      {sessionErrorPanel}
+                    </motion.div>
+                  ) : (
+                    <motion.div
+                      key={`hint-${mode}`}
+                      {...fade}
+                      className="flex flex-col items-center gap-2"
+                    >
+                      <p className="text-sm text-muted">
+                        Tap to start listening.
+                      </p>
+                      {mode === "practice" ? (
+                        <p className="text-sm text-faint">
+                          Try{" "}
+                          <span className="text-muted">
+                            &ldquo;Where do you see yourself in five
+                            years?&rdquo;
+                          </span>
+                        </p>
+                      ) : (
+                        <p className="text-sm text-faint">
+                          Pick the meeting tab and tick &ldquo;Also share tab
+                          audio.&rdquo;
+                        </p>
+                      )}
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+              </section>
+
+              {/* History persists after stopping, so it feels like memory. */}
+              {history.length > 0 && (
+                <motion.div {...fade} className="w-full">
+                  <HistoryPanel
+                    entries={history}
+                    reducedMotion={!!reducedMotion}
                   />
-                )}
-              </motion.div>
-            ) : answer ? (
-              <motion.dl
-                key={answer.klingon}
-                initial={enter}
-                animate={entered}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
-                className="flex flex-col gap-8 border-t border-line pt-10"
-              >
-                <div className="flex flex-col gap-2">
-                  <dt className="text-[11px] font-medium uppercase tracking-[0.18em] text-faint">
-                    Your answer
-                  </dt>
-                  <dd className="text-3xl font-semibold leading-tight tracking-tight">
-                    {answer.klingon}
-                  </dd>
-                </div>
-                <div className="flex flex-col gap-2">
-                  <dt className="text-[11px] font-medium uppercase tracking-[0.18em] text-faint">
-                    pIqaD
-                  </dt>
-                  <dd className="piqad text-2xl leading-snug text-foreground/90">
-                    {answer.pIqaD}
-                  </dd>
-                </div>
-                <div className="flex flex-col gap-2">
-                  <dt className="text-[11px] font-medium uppercase tracking-[0.18em] text-faint">
-                    Literal meaning
-                  </dt>
-                  <dd className="text-sm leading-6 text-muted">
-                    {answer.backTranslation}
-                  </dd>
-                </div>
-                <div className="flex flex-col gap-2 border-t border-line/60 pt-6">
-                  <dt className="text-[11px] font-medium uppercase tracking-[0.18em] text-faint">
-                    Federation Standard
-                  </dt>
-                  <dd className="text-sm leading-6 text-faint">
-                    {answer.english}
-                  </dd>
-                </div>
-              </motion.dl>
-            ) : hasTranscript || running ? (
-              <motion.p
-                key="empty"
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 1 }}
-                exit={{ opacity: 0 }}
-                transition={{ duration: 0.3 }}
-                className="pt-6 text-center text-sm text-faint"
-              >
-                Your answer will appear here.
-              </motion.p>
-            ) : null}
-          </AnimatePresence>
-        </section>
+                </motion.div>
+              )}
+            </div>
+          )}
+        </LayoutGroup>
       </main>
 
-      {/* Persistent status bar */}
-      <footer className="fixed inset-x-0 bottom-0 border-t border-line bg-background/85 backdrop-blur">
-        <div className="mx-auto flex h-10 w-full max-w-[720px] items-center justify-between px-6 text-xs text-muted">
+      {/* Persistent status bar: solid ground so scrolling content never
+          shows through, full-width so it reads as app chrome rather than
+          part of the text column. */}
+      <footer className="fixed inset-x-0 bottom-0 border-t border-line bg-background pb-[env(safe-area-inset-bottom)]">
+        <div className="flex h-12 w-full items-center justify-between px-6 text-xs text-muted">
           <span className="flex items-center gap-2">
             <span
               aria-hidden="true"
@@ -710,7 +791,7 @@ export default function Home() {
             />
             {mode === "practice" ? "Practice" : "Live"} · {connectionLabel}
           </span>
-          <span className="flex items-center gap-3">
+          <span className="flex items-center gap-4">
             <a
               href="https://www.assemblyai.com"
               target="_blank"
@@ -730,4 +811,221 @@ export default function Home() {
       </footer>
     </div>
   );
+}
+
+/** The stage's centrepiece: thinking → error → answer, with an empty prompt. */
+function AnswerStage({
+  answer,
+  loading,
+  error,
+  onRetry,
+  fade,
+}: {
+  answer: AnswerPayload | null;
+  loading: boolean;
+  error: AnswerError | null;
+  onRetry: () => void;
+  fade: object;
+}) {
+  return (
+    <AnimatePresence mode="wait">
+      {loading ? (
+        <motion.div
+          key="thinking"
+          {...fade}
+          className="flex items-center gap-2 pt-4"
+          aria-label="Composing answer"
+        >
+          {[0, 1, 2].map((i) => (
+            <span
+              key={i}
+              className="thinking-dot h-1.5 w-1.5 rounded-full bg-muted"
+              style={{ animationDelay: `${i * 0.2}s` }}
+            />
+          ))}
+        </motion.div>
+      ) : error ? (
+        <motion.div key="answer-error" {...fade}>
+          {error.kind === "rate-limited" ? (
+            <StatePanel
+              title="The demo is popular right now"
+              body="Too many questions in the last minute. Give it a few seconds — your question is saved."
+              actionLabel="Retry"
+              onAction={onRetry}
+            />
+          ) : (
+            <StatePanel
+              alert
+              title={
+                error.kind === "network"
+                  ? "Couldn't reach the server"
+                  : "Couldn't compose an answer"
+              }
+              body={
+                error.kind === "network"
+                  ? "The request didn't make it out. Check your connection — your question is saved."
+                  : "Something went wrong while generating the Klingon. Your question is saved, so just retry."
+              }
+              actionLabel="Retry"
+              onAction={onRetry}
+            />
+          )}
+        </motion.div>
+      ) : answer ? (
+        <motion.div
+          key={answer.klingon}
+          {...fade}
+          className="flex flex-col gap-5"
+        >
+          <div className="flex flex-col gap-2">
+            <StageLabel>Answer</StageLabel>
+            <p className="text-3xl font-semibold leading-tight tracking-tight text-foreground sm:text-4xl">
+              {answer.klingon}
+            </p>
+          </div>
+          <p className="piqad text-2xl leading-snug text-accent sm:text-3xl">
+            {answer.pIqaD}
+          </p>
+          <p className="text-xs leading-5 text-faint">
+            Literal: {answer.backTranslation}
+          </p>
+          <div className="flex flex-col gap-1.5 border-t border-line/60 pt-4">
+            <StageLabel>Suggested (EN)</StageLabel>
+            <p className="text-sm leading-6 text-muted">{answer.english}</p>
+          </div>
+        </motion.div>
+      ) : (
+        <motion.div
+          key="empty"
+          {...fade}
+          className="flex flex-col items-center justify-center gap-3 rounded-2xl border border-dashed border-line/70 py-12 text-center"
+        >
+          <span
+            aria-hidden="true"
+            className="thinking-dot h-2 w-2 rounded-full bg-accent/70"
+          />
+          <p className="text-sm text-faint">
+            Speak a question — your Klingon answer appears here.
+          </p>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+/** Scrollable log of prior exchanges, newest on top. */
+function HistoryPanel({
+  entries,
+  reducedMotion,
+}: {
+  entries: HistoryEntry[];
+  reducedMotion: boolean;
+}) {
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex items-center gap-2">
+        <StageLabel>History</StageLabel>
+        {entries.length > 0 && (
+          <span className="text-[10px] tabular-nums text-faint">
+            {entries.length}
+          </span>
+        )}
+      </div>
+      {entries.length === 0 ? (
+        <p className="rounded-xl border border-dashed border-line/70 px-4 py-6 text-center text-xs text-faint">
+          Previous exchanges collect here.
+        </p>
+      ) : (
+        <div className="flex max-h-72 flex-col gap-2 overflow-y-auto pr-1">
+          <AnimatePresence initial={false}>
+            {entries.map((entry) => (
+              <motion.div
+                key={entry.id}
+                initial={
+                  reducedMotion ? { opacity: 0 } : { opacity: 0, y: -8 }
+                }
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.28, ease: [0.22, 1, 0.36, 1] }}
+                className="flex flex-col gap-1 rounded-xl border border-line bg-surface/40 px-4 py-3"
+              >
+                <p className="text-xs leading-5 text-faint">{entry.question}</p>
+                <p className="text-sm font-medium leading-6 text-foreground">
+                  {entry.klingon}
+                </p>
+                <p className="piqad text-sm leading-6 text-accent">
+                  {entry.pIqaD}
+                </p>
+              </motion.div>
+            ))}
+          </AnimatePresence>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Maps a session-level error to its designed panel. */
+function SessionErrorPanel({
+  kind,
+  onRetry,
+  onUsePractice,
+}: {
+  kind: SessionErrorKind;
+  onRetry: () => void;
+  onUsePractice: () => void;
+}) {
+  switch (kind) {
+    case "mic-denied":
+      return (
+        <StatePanel
+          alert
+          title="Microphone access is blocked"
+          body="Kluely needs to hear the question. Allow microphone access for this site in your browser's address bar, then try again."
+          actionLabel="Try again"
+          onAction={onRetry}
+        />
+      );
+    case "tab-audio":
+      return (
+        <StatePanel
+          alert
+          title="No tab audio was shared"
+          body={
+            'Pick the meeting tab in Chrome’s picker and tick "Also share tab audio" at the bottom — sharing a window or screen won’t carry sound.'
+          }
+          actionLabel="Share again"
+          onAction={onRetry}
+        />
+      );
+    case "unsupported":
+      return (
+        <StatePanel
+          alert
+          title="Tab capture isn't supported here"
+          body="This browser can't capture tab audio. Use Chrome or Edge on desktop, or switch to Practice mode and use your microphone."
+          actionLabel="Use Practice mode"
+          onAction={onUsePractice}
+        />
+      );
+    case "busy":
+      return (
+        <StatePanel
+          title="All demo slots are in use"
+          body="Kluely limits simultaneous sessions to stay inside its API budget. Slots free up within a few minutes."
+          actionLabel="Try again"
+          onAction={onRetry}
+        />
+      );
+    case "connection":
+      return (
+        <StatePanel
+          alert
+          title="Connection lost"
+          body="The transcription session ended unexpectedly. Check your network and start again — nothing you said was lost."
+          actionLabel="Reconnect"
+          onAction={onRetry}
+        />
+      );
+  }
 }
