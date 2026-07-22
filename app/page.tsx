@@ -321,7 +321,32 @@ export default function Home() {
     : ({ opacity: 1, y: 0 } as const);
 
   return (
-    <div className="flex min-h-screen flex-col">
+    <div className="relative flex min-h-screen flex-col">
+      {/* Donation aside, top right */}
+      <div className="group absolute right-6 top-6 text-xs">
+        <a
+          href={DONATION_URL}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-describedby="donation-note"
+          className="flex items-center gap-1 text-muted transition-colors hover:text-accent focus-visible:text-accent"
+        >
+          Help keep the cloaking device running!
+          <span
+            aria-hidden="true"
+            className="transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none"
+          >
+            →
+          </span>
+        </a>
+        <span
+          id="donation-note"
+          role="tooltip"
+          className="pointer-events-none absolute right-0 top-full mt-2 whitespace-nowrap rounded-md border border-line bg-surface px-2.5 py-1 text-[11px] text-muted opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
+        >
+          Donations cover API costs.
+        </span>
+      </div>
       <main className="mx-auto flex w-full max-w-[720px] flex-1 flex-col items-center gap-12 px-6 pb-24 pt-20">
         <header className="flex flex-col items-center gap-4 text-center">
           <h1>
@@ -694,33 +719,6 @@ export default function Home() {
             >
               Powered by AssemblyAI
             </a>
-            <span aria-hidden="true" className="text-faint">
-              ·
-            </span>
-            <span className="group relative">
-              <a
-                href={DONATION_URL}
-                target="_blank"
-                rel="noopener noreferrer"
-                aria-describedby="donation-note"
-                className="flex items-center gap-1 text-muted transition-colors hover:text-accent focus-visible:text-accent"
-              >
-                Keep the cloaking device running
-                <span
-                  aria-hidden="true"
-                  className="transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none"
-                >
-                  →
-                </span>
-              </a>
-              <span
-                id="donation-note"
-                role="tooltip"
-                className="pointer-events-none absolute bottom-full left-1/2 mb-2 -translate-x-1/2 whitespace-nowrap rounded-md border border-line bg-surface px-2.5 py-1 text-[11px] text-muted opacity-0 transition-opacity group-focus-within:opacity-100 group-hover:opacity-100"
-              >
-                Donations cover API costs.
-              </span>
-            </span>
             <span aria-hidden="true" className="text-faint">
               ·
             </span>
