@@ -9,6 +9,13 @@ const HIDDEN_TAB_TERMINATE_MS = 30_000;
 const BEGIN_TIMEOUT_MS = 10_000;
 const TERMINATION_TIMEOUT_MS = 5_000;
 
+// 16-bit mono PCM ⇒ 2 bytes per audio sample.
+const BYTES_PER_SAMPLE = 2;
+// Rolling window of per-word latency samples behind the p50 readout.
+const LATENCY_WINDOW = 50;
+// Samples above this are a stale anchor or clock glitch, not real latency.
+const MAX_PLAUSIBLE_LATENCY_MS = 5_000;
+
 export interface TurnWord {
   text: string;
   start: number;
@@ -56,12 +63,16 @@ export type SessionState =
 export interface AssemblyAIStreamCallbacks {
   /** Turn message with end_of_turn: false — in-progress transcript. */
   onPartialTranscript?: (turn: TurnMessage) => void;
+  /** Turn message with end_of_turn: true — finalized, formatted transcript. */
+  onFinalTranscript?: (turn: TurnMessage) => void;
   /**
-   * Turn message with end_of_turn: true — finalized, formatted transcript.
-   * `latencyMs` is the time between sending the last audio chunk before this
-   * final and receiving it, or null if no audio had been sent yet.
+   * Fired whenever the rolling-median (p50) transcription latency updates: the
+   * time from sending a chunk of audio to the corresponding word first
+   * appearing in a Turn message (partial or final), in milliseconds. This is
+   * the streaming latency AssemblyAI publishes (~300ms p50), not the
+   * finalization tail.
    */
-  onFinalTranscript?: (turn: TurnMessage, latencyMs: number | null) => void;
+  onLatency?: (p50Ms: number) => void;
   onError?: (error: Error) => void;
   /**
    * Fired once when the session is over, however it ended. `termination` is
@@ -122,8 +133,14 @@ export class AssemblyAIStream {
   private onTerminated: (() => void) | null = null;
   private hiddenTimer: number | null = null;
   private listenersAttached = false;
-  private lastAudioSentAt: number | null = null;
-  private latestTurnLatencyMs: number | null = null;
+  // Streaming-latency measurement: anchor audio-stream time 0 to the wall
+  // clock, then for each word time (message received) − (audio sent) and
+  // report a rolling median.
+  private audioMsSent = 0;
+  private audioClockBase: number | null = null;
+  private latencySamples: number[] = [];
+  private measuredTurnOrder: number | null = null;
+  private measuredWordCount = 0;
 
   constructor(callbacks: AssemblyAIStreamCallbacks = {}) {
     this.callbacks = callbacks;
@@ -137,9 +154,9 @@ export class AssemblyAIStream {
     return this.sessionId;
   }
 
-  /** Latency of the most recent finalized turn, in ms. */
-  get lastTurnLatencyMs(): number | null {
-    return this.latestTurnLatencyMs;
+  /** Rolling median (p50) transcription latency in ms, or null before any word. */
+  get latencyP50Ms(): number | null {
+    return this.medianLatencyMs();
   }
 
   /** Fetches a token, opens the socket, and resolves once the session has begun. */
@@ -151,7 +168,11 @@ export class AssemblyAIStream {
     this.sessionEnded = false;
     this.sessionId = null;
     this.terminationInfo = null;
-    this.lastAudioSentAt = null;
+    this.audioMsSent = 0;
+    this.audioClockBase = null;
+    this.latencySamples = [];
+    this.measuredTurnOrder = null;
+    this.measuredWordCount = 0;
 
     let token: string;
     try {
@@ -209,7 +230,16 @@ export class AssemblyAIStream {
       return;
     }
     this.ws.send(chunk);
-    this.lastAudioSentAt = performance.now();
+    // Track how much audio (in ms of stream time) we've sent and anchor stream
+    // time 0 to the wall clock, so a word's `end` timestamp can be mapped back
+    // to the moment its audio was sent.
+    const chunkMs = (chunk.byteLength / BYTES_PER_SAMPLE / SAMPLE_RATE) * 1000;
+    if (this.audioClockBase === null) {
+      // This first chunk carries stream time [0, chunkMs); its last sample was
+      // just captured, so stream time 0 sits chunkMs in the past.
+      this.audioClockBase = performance.now() - chunkMs;
+    }
+    this.audioMsSent += chunkMs;
   }
 
   /**
@@ -290,13 +320,11 @@ export class AssemblyAIStream {
       }
       case "Turn": {
         const turn = message as TurnMessage;
+        // Measure streaming latency on every Turn — partial or final — from the
+        // first appearance of each word.
+        this.recordWordLatencies(turn);
         if (turn.end_of_turn) {
-          const latencyMs =
-            this.lastAudioSentAt !== null
-              ? Math.round(performance.now() - this.lastAudioSentAt)
-              : null;
-          this.latestTurnLatencyMs = latencyMs;
-          this.callbacks.onFinalTranscript?.(turn, latencyMs);
+          this.callbacks.onFinalTranscript?.(turn);
         } else {
           this.callbacks.onPartialTranscript?.(turn);
         }
@@ -314,6 +342,62 @@ export class AssemblyAIStream {
       default:
         break;
     }
+  }
+
+  /**
+   * Records the transcription latency of every newly-appeared word in a Turn:
+   * the delay between sending the audio through that word's end and receiving
+   * the message that first contains it. Runs on partials and finals, since a
+   * word usually surfaces in a partial first. This is the metric AssemblyAI
+   * publishes (~300ms p50), not the finalization tail.
+   */
+  private recordWordLatencies(turn: TurnMessage): void {
+    if (this.audioClockBase === null || !turn.words || turn.words.length === 0) {
+      return;
+    }
+    // Word indices only ever grow within a turn, so track how many we've
+    // already timed and measure only the ones that just appeared.
+    if (this.measuredTurnOrder !== turn.turn_order) {
+      this.measuredTurnOrder = turn.turn_order;
+      this.measuredWordCount = 0;
+    }
+    if (turn.words.length <= this.measuredWordCount) {
+      return;
+    }
+    const receivedAt = performance.now();
+    for (let i = this.measuredWordCount; i < turn.words.length; i++) {
+      // `end` is ms of stream time; audioClockBase + end is the wall-clock
+      // moment that audio was sent.
+      const audioSentAt = this.audioClockBase + turn.words[i].end;
+      const latency = receivedAt - audioSentAt;
+      if (latency >= 0 && latency < MAX_PLAUSIBLE_LATENCY_MS) {
+        this.pushLatencySample(latency);
+      }
+    }
+    this.measuredWordCount = turn.words.length;
+  }
+
+  private pushLatencySample(ms: number): void {
+    this.latencySamples.push(ms);
+    if (this.latencySamples.length > LATENCY_WINDOW) {
+      this.latencySamples.shift();
+    }
+    const p50 = this.medianLatencyMs();
+    if (p50 !== null) {
+      this.callbacks.onLatency?.(p50);
+    }
+  }
+
+  private medianLatencyMs(): number | null {
+    const n = this.latencySamples.length;
+    if (n === 0) {
+      return null;
+    }
+    const sorted = [...this.latencySamples].sort((a, b) => a - b);
+    const mid = Math.floor(n / 2);
+    const median =
+      n % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+    return Math.round(median);
   }
 
   private handleClose(event: CloseEvent): void {

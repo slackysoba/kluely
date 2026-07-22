@@ -395,9 +395,9 @@ export default function Home() {
 
     const stream = new AssemblyAIStream({
       onPartialTranscript: (turn) => setPartial(turn.transcript),
-      onFinalTranscript: (turn, latency) => {
+      onLatency: (p50) => setLatencyMs(p50),
+      onFinalTranscript: (turn) => {
         setPartial("");
-        setLatencyMs(latency);
         if (turn.transcript) {
           // The previous answer becomes history; this turn takes the stage.
           archiveCurrent();
@@ -599,7 +599,7 @@ export default function Home() {
                   <div className="flex w-full flex-col items-center gap-4 border-t border-line/70 pt-4">
                     <RailStat label="Timer" value={formatElapsed(elapsedMs)} />
                     <RailStat
-                      label="Latency"
+                      label="Transcription · p50"
                       value={latencyMs !== null ? `${latencyMs}ms` : "—"}
                     />
                     <div className="flex items-center gap-1.5">
@@ -830,8 +830,14 @@ export default function Home() {
               <span aria-hidden="true" className="text-faint">
                 ·
               </span>
-              <span className="font-mono tabular-nums">
-                {latencyMs !== null ? `${latencyMs} ms` : "— ms"}
+              <span
+                className="flex items-center gap-1.5"
+                title="Transcription latency — rolling median (p50): time from audio sent to the word appearing in a transcript"
+              >
+                <span className="text-faint">p50</span>
+                <span className="font-mono tabular-nums">
+                  {latencyMs !== null ? `${latencyMs} ms` : "— ms"}
+                </span>
               </span>
             </span>
           </span>
