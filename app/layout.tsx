@@ -23,23 +23,39 @@ const piqad = localFont({
   display: "swap",
 });
 
+// Absolute production origin. iMessage/Twitter require an absolute https URL
+// for og:image — a relative path (or one resolved against a localhost
+// metadataBase when the env var is unset on Vercel) is what shows the grey
+// placeholder bar. Hardcode the origin so the tag is correct regardless.
+const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL ?? "https://kluely.vercel.app";
+const OG_IMAGE = `${SITE_URL}/og-image.png`;
+const OG_ALT = "Kluely — interview coaching for Klingons";
+
 export const metadata: Metadata = {
-  metadataBase: new URL(
-    process.env.NEXT_PUBLIC_SITE_URL ?? "http://localhost:3000"
-  ),
+  metadataBase: new URL(SITE_URL),
   title: "Kluely — interview coaching for Klingons",
   description:
     "Speak the interviewer's question aloud and answer with honor.",
   openGraph: {
-    title: "Kluely",
+    title: "Kluely — interview coaching for Klingons",
     description: "Interview coaching for Klingons.",
     siteName: "Kluely",
     type: "website",
+    url: SITE_URL,
+    images: [
+      {
+        url: OG_IMAGE,
+        width: 1200,
+        height: 630,
+        alt: OG_ALT,
+      },
+    ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "Kluely",
+    title: "Kluely — interview coaching for Klingons",
     description: "Interview coaching for Klingons.",
+    images: [OG_IMAGE],
   },
 };
 

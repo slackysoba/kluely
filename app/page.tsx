@@ -160,15 +160,21 @@ function RecordOrb({
       aria-pressed={running}
       aria-label={running ? "Stop listening" : "Start listening"}
       className={`relative flex items-center justify-center rounded-full border transition-colors duration-300 disabled:opacity-60 ${
-        isCenter ? "h-24 w-24" : "h-16 w-16"
+        isCenter ? "h-24 w-24 lg:h-[104px] lg:w-[104px]" : "h-16 w-16"
       } ${
         running
           ? "recording-pulse border-accent bg-accent"
           : "border-line bg-surface hover:border-accent/70"
       }`}
     >
-      <span
-        className={`${isCenter ? "h-7 w-7" : "h-5 w-5"} ${
+      {/* The dot is its own shared-layout element so framer projects it
+          concentrically with the button — same layoutId lifetime, same
+          transition — instead of letting it ride the parent's scale and
+          drift off its own arc. */}
+      <motion.span
+        layoutId={`${ORB_ID}-dot`}
+        transition={transition}
+        className={`${isCenter ? "h-7 w-7 lg:h-[30px] lg:w-[30px]" : "h-5 w-5"} ${
           running ? "rounded-[6px] bg-background" : "rounded-full bg-accent"
         }`}
       />
@@ -515,8 +521,10 @@ export default function Home() {
 
   return (
     <div className="relative flex min-h-screen flex-col">
-      {/* Donation aside, top right */}
-      <div className="group absolute right-6 top-6 z-10 text-xs">
+      {/* Donation aside, top right (desktop only). On mobile this absolute
+          link floats over the header, so it's hidden here and shown in the
+          footer instead — see below. */}
+      <div className="group absolute right-6 top-6 z-10 hidden text-xs sm:block">
         <a
           href={DONATION_URL}
           target="_blank"
@@ -541,11 +549,11 @@ export default function Home() {
         </span>
       </div>
 
-      <main className="flex w-full flex-1 flex-col px-6 pb-28 pt-8">
+      <main className="flex w-full flex-1 flex-col px-6 pb-28 pt-8 sm:pb-16">
         <LayoutGroup>
           {active ? (
             /* ---------- RECORDING: left rail + working stage ---------- */
-            <div className="mx-auto w-full max-w-[1040px]">
+            <div className="mx-auto w-full max-w-[1040px] xl:max-w-[1180px]">
               <motion.div
                 {...fade}
                 className="mb-8 flex items-center gap-2.5"
@@ -655,7 +663,7 @@ export default function Home() {
             </div>
           ) : (
             /* ---------- IDLE: calm centered layout ---------- */
-            <div className="mx-auto flex w-full max-w-[720px] flex-col items-center gap-9 pt-6">
+            <div className="mx-auto flex w-full max-w-[720px] flex-col items-center gap-8 lg:max-w-[760px] lg:gap-9">
               <header className="flex flex-col items-center gap-3 text-center">
                 <h1
                   aria-label="Kluely"
@@ -667,16 +675,16 @@ export default function Home() {
                     width={120}
                     height={160}
                     loading="eager"
-                    className="h-9 w-auto sm:h-11"
+                    className="h-9 w-auto sm:h-11 lg:h-12"
                   />
-                  <Wordmark className="h-8 w-auto sm:h-10" />
+                  <Wordmark className="h-8 w-auto sm:h-10 lg:h-11" />
                 </h1>
-                <p className="text-sm text-muted">
+                <p className="text-sm text-muted lg:text-base">
                   Interview coaching for Klingons.
                 </p>
                 {/* Mode: makes the capture scope explicit */}
                 <div
-                  className="mt-2.5 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs"
+                  className="mt-2.5 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs lg:text-sm"
                   role="group"
                   aria-label="Capture mode"
                 >
@@ -684,7 +692,7 @@ export default function Home() {
                     type="button"
                     aria-pressed={mode === "practice"}
                     onClick={() => switchMode("practice")}
-                    className={`rounded-full px-3.5 py-1 transition-colors ${
+                    className={`rounded-full px-3.5 py-1 transition-colors lg:px-4 ${
                       mode === "practice"
                         ? "bg-background font-medium text-foreground"
                         : "text-muted hover:text-foreground"
@@ -696,7 +704,7 @@ export default function Home() {
                     type="button"
                     aria-pressed={mode === "live"}
                     onClick={() => switchMode("live")}
-                    className={`rounded-full px-3.5 py-1 transition-colors ${
+                    className={`rounded-full px-3.5 py-1 transition-colors lg:px-4 ${
                       mode === "live"
                         ? "bg-background font-medium text-foreground"
                         : "text-muted hover:text-foreground"
@@ -705,7 +713,7 @@ export default function Home() {
                     Live
                   </button>
                 </div>
-                <p className="text-xs text-faint">
+                <p className="text-xs text-faint lg:text-sm">
                   {mode === "practice"
                     ? "Uses your microphone — answering what you say."
                     : "Captures a browser tab — answering what they ask."}
@@ -741,11 +749,11 @@ export default function Home() {
                       {...fade}
                       className="flex flex-col items-center gap-2"
                     >
-                      <p className="text-sm text-muted">
+                      <p className="text-sm text-muted lg:text-base">
                         Tap to start listening.
                       </p>
                       {mode === "practice" ? (
-                        <p className="text-sm text-faint">
+                        <p className="text-sm text-faint lg:text-base">
                           Try{" "}
                           <span className="text-muted">
                             &ldquo;Where do you see yourself in five
@@ -753,7 +761,7 @@ export default function Home() {
                           </span>
                         </p>
                       ) : (
-                        <p className="text-sm text-faint">
+                        <p className="text-sm text-faint lg:text-base">
                           Pick the meeting tab and tick &ldquo;Also share tab
                           audio.&rdquo;
                         </p>
@@ -781,7 +789,9 @@ export default function Home() {
           shows through, full-width so it reads as app chrome rather than
           part of the text column. */}
       <footer className="fixed inset-x-0 bottom-0 border-t border-line bg-background pb-[env(safe-area-inset-bottom)]">
-        <div className="flex h-12 w-full items-center justify-between px-6 text-xs text-muted">
+        {/* Stacks vertically on mobile (donation + credit in one tidy column),
+            collapses to a single status-bar row from sm up. */}
+        <div className="flex w-full flex-col items-center gap-1.5 px-6 py-2.5 text-xs text-muted sm:h-12 sm:flex-row sm:justify-between sm:gap-4 sm:py-0">
           <span className="flex items-center gap-2">
             <span
               aria-hidden="true"
@@ -791,20 +801,38 @@ export default function Home() {
             />
             {mode === "practice" ? "Practice" : "Live"} · {connectionLabel}
           </span>
-          <span className="flex items-center gap-4">
+          <span className="flex flex-col items-center gap-1.5 sm:flex-row sm:gap-4">
+            {/* Mobile-only donation: the desktop copy lives top-right. Styled
+                to match the surrounding footer links rather than float. */}
             <a
-              href="https://www.assemblyai.com"
+              href={DONATION_URL}
               target="_blank"
               rel="noopener noreferrer"
-              className="text-muted transition-colors hover:text-foreground"
+              className="group flex items-center gap-1 text-muted transition-colors hover:text-accent focus-visible:text-accent sm:hidden"
             >
-              Powered by AssemblyAI
+              Help keep the cloaking device running!
+              <span
+                aria-hidden="true"
+                className="transition-transform group-hover:translate-x-0.5 motion-reduce:transition-none"
+              >
+                →
+              </span>
             </a>
-            <span aria-hidden="true" className="text-faint">
-              ·
-            </span>
-            <span className="font-mono tabular-nums">
-              {latencyMs !== null ? `${latencyMs} ms` : "— ms"}
+            <span className="flex items-center gap-3">
+              <a
+                href="https://www.assemblyai.com"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-muted transition-colors hover:text-foreground"
+              >
+                Powered by AssemblyAI
+              </a>
+              <span aria-hidden="true" className="text-faint">
+                ·
+              </span>
+              <span className="font-mono tabular-nums">
+                {latencyMs !== null ? `${latencyMs} ms` : "— ms"}
+              </span>
             </span>
           </span>
         </div>
@@ -879,11 +907,11 @@ function AnswerStage({
         >
           <div className="flex flex-col gap-2">
             <StageLabel>Answer</StageLabel>
-            <p className="text-3xl font-semibold leading-tight tracking-tight text-foreground sm:text-4xl">
+            <p className="text-3xl font-semibold leading-tight tracking-tight text-foreground sm:text-4xl lg:text-5xl">
               {answer.klingon}
             </p>
           </div>
-          <p className="piqad text-2xl leading-snug text-accent sm:text-3xl">
+          <p className="piqad text-2xl leading-snug text-accent sm:text-3xl lg:text-4xl">
             {answer.pIqaD}
           </p>
           <p className="text-xs leading-5 text-faint">
