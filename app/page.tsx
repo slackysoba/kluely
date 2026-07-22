@@ -683,8 +683,21 @@ export default function Home() {
             />
             {mode === "practice" ? "Practice" : "Live"} · {connectionLabel}
           </span>
-          <span className="font-mono tabular-nums">
-            {latencyMs !== null ? `${latencyMs} ms` : "— ms"}
+          <span className="flex items-center gap-3">
+            <a
+              href="https://www.assemblyai.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-muted transition-colors hover:text-foreground"
+            >
+              Powered by AssemblyAI
+            </a>
+            <span aria-hidden="true" className="text-faint">
+              ·
+            </span>
+            <span className="font-mono tabular-nums">
+              {latencyMs !== null ? `${latencyMs} ms` : "— ms"}
+            </span>
           </span>
         </div>
       </footer>
