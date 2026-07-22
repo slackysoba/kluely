@@ -3,7 +3,10 @@
 import { useCallback, useRef, useState } from "react";
 import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { AudioCapture, MicrophonePermissionError } from "@/lib/audio-capture";
-import { AssemblyAIStream } from "@/lib/assemblyai-stream";
+import {
+  AssemblyAIStream,
+  SessionCapacityError,
+} from "@/lib/assemblyai-stream";
 import Logo from "@/components/Logo";
 
 const WAVE_BARS = 40;
@@ -16,10 +19,10 @@ interface AnswerPayload {
   backTranslation: string;
 }
 
-type SessionErrorKind = "mic-denied" | "connection";
+type SessionErrorKind = "mic-denied" | "connection" | "busy";
 
 interface AnswerError {
-  kind: "network" | "api";
+  kind: "network" | "api" | "rate-limited";
   question: string;
 }
 
@@ -147,6 +150,12 @@ export default function Home() {
       if (answerAbortRef.current !== controller) {
         return;
       }
+      if (res.status === 429) {
+        setAnswerError({ kind: "rate-limited", question });
+        setAnswer(null);
+        setAnswerLoading(false);
+        return;
+      }
       const data: unknown = await res.json();
       if (!res.ok || !isAnswerPayload(data)) {
         setAnswerError({ kind: "api", question });
@@ -223,6 +232,8 @@ export default function Home() {
     } catch (err) {
       if (err instanceof MicrophonePermissionError) {
         setSessionError("mic-denied");
+      } else if (err instanceof SessionCapacityError) {
+        setSessionError("busy");
       } else {
         setSessionError("connection");
         console.error(err);
@@ -355,6 +366,21 @@ export default function Home() {
                   onAction={() => void startPipeline()}
                 />
               </motion.div>
+            ) : sessionError === "busy" ? (
+              <motion.div
+                key="busy"
+                initial={enter}
+                animate={entered}
+                exit={{ opacity: 0 }}
+                transition={{ duration: 0.3 }}
+              >
+                <StatePanel
+                  title="All demo slots are in use"
+                  body="Kluely limits simultaneous sessions to stay inside its API budget. Slots free up within a few minutes."
+                  actionLabel="Try again"
+                  onAction={() => void startPipeline()}
+                />
+              </motion.div>
             ) : sessionError === "connection" ? (
               <motion.div
                 key="connection-error"
@@ -453,21 +479,30 @@ export default function Home() {
                 transition={{ duration: 0.3 }}
                 className="pt-6"
               >
-                <StatePanel
-                  alert
-                  title={
-                    answerError.kind === "network"
-                      ? "Couldn't reach the server"
-                      : "Couldn't compose an answer"
-                  }
-                  body={
-                    answerError.kind === "network"
-                      ? "The request didn't make it out. Check your connection — your question is saved."
-                      : "Something went wrong while generating the Klingon. Your question is saved, so just retry."
-                  }
-                  actionLabel="Retry"
-                  onAction={retryAnswer}
-                />
+                {answerError.kind === "rate-limited" ? (
+                  <StatePanel
+                    title="The demo is popular right now"
+                    body="Too many questions in the last minute. Give it a few seconds — your question is saved."
+                    actionLabel="Retry"
+                    onAction={retryAnswer}
+                  />
+                ) : (
+                  <StatePanel
+                    alert
+                    title={
+                      answerError.kind === "network"
+                        ? "Couldn't reach the server"
+                        : "Couldn't compose an answer"
+                    }
+                    body={
+                      answerError.kind === "network"
+                        ? "The request didn't make it out. Check your connection — your question is saved."
+                        : "Something went wrong while generating the Klingon. Your question is saved, so just retry."
+                    }
+                    actionLabel="Retry"
+                    onAction={retryAnswer}
+                  />
+                )}
               </motion.div>
             ) : answer ? (
               <motion.dl

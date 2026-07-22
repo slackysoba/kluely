@@ -71,6 +71,14 @@ export interface AssemblyAIStreamCallbacks {
   onSessionEnd?: (termination: TerminationMessage | null) => void;
 }
 
+/** Thrown when the demo's session-concurrency cap rejects a new session. */
+export class SessionCapacityError extends Error {
+  constructor() {
+    super("All demo session slots are currently in use");
+    this.name = "SessionCapacityError";
+  }
+}
+
 function parseServerMessage(raw: string): ServerMessage | null {
   try {
     const data: unknown = JSON.parse(raw);
@@ -148,6 +156,9 @@ export class AssemblyAIStream {
     let token: string;
     try {
       const res = await fetch(TOKEN_ENDPOINT);
+      if (res.status === 429) {
+        throw new SessionCapacityError();
+      }
       if (!res.ok) {
         throw new Error(`Token endpoint returned ${res.status}`);
       }

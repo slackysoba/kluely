@@ -6,6 +6,11 @@
 
 import { NextResponse } from "next/server";
 import { KLINGON_GRAMMAR_PRIMER } from "@/lib/klingon-grammar";
+import {
+  KeyedSlidingWindow,
+  SlidingWindow,
+  clientIp,
+} from "@/lib/rate-limit";
 
 // Fastest Flash-family model. Swap here if a newer one ships.
 const MODEL = "gemini-3.5-flash-lite";
@@ -14,6 +19,12 @@ const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MO
 // One overall budget shared by both attempts, not 10s per attempt.
 const TIMEOUT_MS = 10_000;
 const MAX_QUESTION_LENGTH = 2_000;
+
+// Demo abuse protection. The global cap stays under the Gemini free tier's
+// 15 RPM (12 first attempts/min, leaving headroom for malformed-JSON
+// retries). In-memory: resets on restart, per-instance on serverless.
+const perIpLimiter = new KeyedSlidingWindow(10);
+const globalLimiter = new SlidingWindow(12);
 
 interface AnswerPayload {
   english: string;
@@ -127,6 +138,16 @@ async function generateAnswer(
 }
 
 export async function POST(request: Request) {
+  if (!perIpLimiter.tryHit(clientIp(request)) || !globalLimiter.tryHit()) {
+    return NextResponse.json(
+      {
+        error:
+          "The demo is popular right now — give it a few seconds and try again.",
+      },
+      { status: 429, headers: { "Retry-After": "15" } }
+    );
+  }
+
   let question: string;
   try {
     const body = (await request.json()) as { question?: unknown };
