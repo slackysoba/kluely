@@ -26,6 +26,14 @@ const FLAT_LEVELS = new Array<number>(WAVE_BARS).fill(0);
 
 const DONATION_URL = "https://buy.stripe.com/14A5kEg8HeQs1MrdLE28800";
 
+const DOWNLOAD_URL =
+  "https://github.com/slackysoba/kluely/releases/download/v1.1/Kluely_0.1.0_x64_en-US.msi";
+
+// The desktop shell (src-tauri) appends this marker to the webview user agent.
+// Its presence means we're already inside the installed app, so the
+// "Download on Desktop" button is pointless and gets hidden.
+const DESKTOP_APP_UA_MARKER = "KluelyDesktop";
+
 // One id per magic-motion element, so framer glides them between layouts.
 const ORB_ID = "record-orb";
 
@@ -65,6 +73,87 @@ function median(samples: number[]): number | null {
 /** Formats a latency reading for the rail, dashing out the empty state. */
 function formatLatency(ms: number | null): string {
   return ms !== null ? `${ms}ms` : "—";
+}
+
+/**
+ * True only for a real desktop *web browser* — someone who could actually
+ * install the Windows build. Returns false during SSR/first paint (so server
+ * and client agree), then resolves after mount. It hides the download button
+ * for:
+ *  - the installed desktop app, detected by the KluelyDesktop UA marker (the
+ *    app loads a remote URL, so window.__TAURI__ isn't reliable);
+ *  - phones and tablets, detected by a mobile UA *or* the combination of a
+ *    touch-primary pointer and a small viewport (never viewport width alone).
+ */
+function useIsDesktopBrowser(): boolean {
+  const [isDesktop, setIsDesktop] = useState(false);
+
+  useEffect(() => {
+    const ua = navigator.userAgent || "";
+
+    // Already inside the installed desktop app — nothing to download.
+    if (ua.includes(DESKTOP_APP_UA_MARKER)) {
+      return;
+    }
+
+    const mobileUA = /Android|iPhone|iPod|iPad|Mobile|Tablet|Silk|Kindle|PlayBook|Opera Mini/i.test(
+      ua
+    );
+    // iPadOS reports a "Macintosh" desktop UA but exposes touch points.
+    const iPadDesktop = /Macintosh/.test(ua) && navigator.maxTouchPoints > 1;
+
+    const evaluate = () => {
+      const touchPrimary =
+        window.matchMedia("(pointer: coarse)").matches ||
+        window.matchMedia("(hover: none)").matches ||
+        navigator.maxTouchPoints > 1;
+      const smallViewport = window.innerWidth < 1024;
+      // Width alone never decides it — a touch device *and* a small screen, or
+      // an explicit mobile UA, marks it as phone/tablet.
+      const isMobileOrTablet =
+        mobileUA || iPadDesktop || (touchPrimary && smallViewport);
+      setIsDesktop(!isMobileOrTablet);
+    };
+
+    evaluate();
+    window.addEventListener("resize", evaluate);
+    return () => window.removeEventListener("resize", evaluate);
+  }, []);
+
+  return isDesktop;
+}
+
+/** Footer install affordance for desktop browsers. Downward-arrow glyph. */
+function DownloadOnDesktop() {
+  return (
+    <a
+      href={DOWNLOAD_URL}
+      target="_blank"
+      rel="noopener noreferrer"
+      className="group flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-1 text-foreground transition-colors hover:border-accent/70"
+    >
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 16 16"
+        className="h-3.5 w-3.5 text-muted transition-colors group-hover:text-accent"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <path d="M8 2.5v7.5" />
+        <path d="M4.5 6.5 8 10l3.5-3.5" />
+        <path d="M3 13h10" />
+      </svg>
+      <span className="flex flex-col leading-none">
+        <span className="text-xs font-medium">Download on Desktop</span>
+        <span className="mt-0.5 text-[10px] font-normal tracking-wide text-faint">
+          for Windows
+        </span>
+      </span>
+    </a>
+  );
 }
 
 interface AnswerPayload {
@@ -378,6 +467,7 @@ function StageLabel({ children }: { children: React.ReactNode }) {
 
 export default function Home() {
   const reducedMotion = useReducedMotion();
+  const isDesktopBrowser = useIsDesktopBrowser();
 
   const captureRef = useRef<AudioCapture | null>(null);
   const streamRef = useRef<AssemblyAIStream | null>(null);
@@ -975,10 +1065,11 @@ export default function Home() {
           shows through, full-width so it reads as app chrome rather than
           part of the text column. */}
       <footer className="fixed inset-x-0 bottom-0 border-t border-line bg-background pb-[env(safe-area-inset-bottom)]">
-        {/* Stacks vertically on mobile (donation + credit in one tidy column),
-            collapses to a single status-bar row from sm up. */}
-        <div className="flex w-full flex-col items-center gap-1.5 px-6 py-2.5 text-xs text-muted sm:h-12 sm:flex-row sm:justify-between sm:gap-4 sm:py-0">
-          <span className="flex items-center gap-2">
+        {/* Stacks vertically on mobile (donation + credit in one tidy column);
+            from sm up it's a three-zone status bar — status left, install
+            button centered, credit right — so the pieces stay balanced. */}
+        <div className="flex w-full flex-col items-center gap-1.5 px-6 py-2.5 text-xs text-muted sm:grid sm:h-12 sm:grid-cols-3 sm:items-center sm:gap-4 sm:py-0">
+          <span className="flex items-center gap-2 sm:col-start-1 sm:justify-self-start">
             <span
               aria-hidden="true"
               className={`h-1.5 w-1.5 rounded-full ${
@@ -987,7 +1078,17 @@ export default function Home() {
             />
             {mode === "practice" ? "Practice" : "Live"} · {connectionLabel}
           </span>
-          <span className="flex flex-col items-center gap-1.5 sm:flex-row sm:gap-4">
+
+          {/* Centered install affordance — desktop web browsers only. The
+              explicit column placement keeps status/credit balanced even when
+              this middle column is empty (mobile and inside the app). */}
+          {isDesktopBrowser && (
+            <div className="order-first sm:order-none sm:col-start-2 sm:justify-self-center">
+              <DownloadOnDesktop />
+            </div>
+          )}
+
+          <span className="flex flex-col items-center gap-1.5 sm:col-start-3 sm:flex-row sm:justify-self-end sm:gap-4">
             {/* Mobile-only donation: the desktop copy lives top-right. Styled
                 to match the surrounding footer links rather than float. */}
             <a
@@ -1004,9 +1105,6 @@ export default function Home() {
                 →
               </span>
             </a>
-            {/* Balances the status readout on the left: credit sits flush to
-                the footer's right edge on desktop, centered under the donation
-                line on mobile. */}
             <a
               href="https://www.assemblyai.com"
               target="_blank"

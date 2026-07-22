@@ -8,18 +8,7 @@
     "devUrl": "https://kluely.vercel.app"
   },
   "app": {
-    "windows": [
-      {
-        "title": "Kluely",
-        "width": 1100,
-        "height": 800,
-        "minWidth": 480,
-        "minHeight": 600,
-        "resizable": true,
-        "fullscreen": false,
-        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --use-fake-ui-for-media-stream"
-      }
-    ],
+    "windows": [],
     "security": {
       "csp": null
     }
