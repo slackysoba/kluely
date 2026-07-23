@@ -30,7 +30,7 @@ const FLAT_LEVELS = new Array<number>(WAVE_BARS).fill(0);
 const DONATION_URL = "https://buy.stripe.com/14A5kEg8HeQs1MrdLE28800";
 
 const DOWNLOAD_URL =
-  "https://github.com/slackysoba/kluely/releases/download/0.1/Kluely_0.1.0_x64_en-US.msi";
+  "https://github.com/slackysoba/kluely/releases/download/v1.0.0/Kluely_1.0.0_x64_en-US.msi";
 
 // The desktop shell (src-tauri) appends this marker to the webview user agent.
 // Its presence means we're already inside the installed app, so the
