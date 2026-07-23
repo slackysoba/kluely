@@ -20,6 +20,9 @@ import {
 } from "@/lib/assemblyai-stream";
 import Image from "next/image";
 import Wordmark from "@/components/Wordmark";
+// EXPERIMENTAL warp-speed backdrop. Remove this import + the <WarpBackground />
+// below (and components/WarpBackground.tsx) to take it out.
+import WarpBackground from "@/components/WarpBackground";
 
 const WAVE_BARS = 40;
 const FLAT_LEVELS = new Array<number>(WAVE_BARS).fill(0);
@@ -43,25 +46,18 @@ const E2E_WINDOW = 50;
 // Info-tooltip copy for each sidebar latency metric.
 const METRIC_INFO = {
   endToEnd:
-    "Total latency: time from when you stop speaking to the Klingon answer " +
-    "appearing on screen — transcription, the language model, the morphology " +
-    "validation gate (which can trigger a corrective retry), and rendering. " +
-    "The Validation metric breaks out the validation portion of this.",
+    "Total time from when you stop speaking to the Klingon on screen — " +
+    "transcription, the language model, validation, and rendering.",
   wordEmission:
-    "Median time from when a word finishes in your audio to when it appears " +
-    "as transcribed text, measured in the browser. This uses AssemblyAI's " +
-    "own metric definition, but measured end-to-end — so it sits on top of " +
-    "AssemblyAI's ~150ms server-side figure by the amount of network " +
-    "round-trip and client buffering.",
+    "Median time from a word finishing in your audio to it appearing as " +
+    "transcribed text. That's network and buffering on top of AssemblyAI's " +
+    "~150ms server figure.",
   turnDetection:
-    "Time from when you stop speaking to when AssemblyAI signals the turn is " +
-    "complete (end_of_turn). Reflects Universal-Streaming's endpointing and " +
-    "turn-detection speed.",
+    "Time from when you stop speaking to when AssemblyAI marks the turn " +
+    "complete. Reflects its endpointing speed.",
   validation:
-    "Validation latency: the portion of end-to-end spent in the yajwiz " +
-    "morphology gate — parsing the generated Klingon and, if it fails a check, " +
-    "regenerating with a correction. This GATES the answer (it must pass, or " +
-    "exhaust retries, before display). Warp mode skips it entirely.",
+    "Time spent checking the Klingon's morphology and regenerating when a " +
+    "check fails. The answer waits for this. Warp skips it.",
 } as const;
 
 /** Rounded median (p50) of a sample window, or null when it's empty. */
@@ -301,7 +297,7 @@ function RecordOrb({
       aria-pressed={running}
       aria-label={running ? "Stop listening" : "Start listening"}
       className={`relative flex items-center justify-center rounded-full border transition-colors duration-300 disabled:opacity-60 ${
-        isCenter ? "h-24 w-24 lg:h-[104px] lg:w-[104px]" : "h-16 w-16"
+        isCenter ? "h-28 w-28 lg:h-[128px] lg:w-[128px]" : "h-16 w-16"
       } ${
         running
           ? "recording-pulse border-accent bg-accent"
@@ -315,7 +311,7 @@ function RecordOrb({
       <motion.span
         layoutId={`${ORB_ID}-dot`}
         transition={transition}
-        className={`${isCenter ? "h-7 w-7 lg:h-[30px] lg:w-[30px]" : "h-5 w-5"} ${
+        className={`${isCenter ? "h-8 w-8 lg:h-9 lg:w-9" : "h-5 w-5"} ${
           running ? "rounded-[6px] bg-background" : "rounded-full bg-accent"
         }`}
       />
@@ -1023,6 +1019,7 @@ export default function Home() {
 
   return (
     <div className="relative flex min-h-screen flex-col">
+      <WarpBackground />
       {/* Donation aside, top right (desktop only). On mobile this absolute
           link floats over the header, so it's hidden here and shown in the
           footer instead — see below. */}
@@ -1203,16 +1200,16 @@ export default function Home() {
                     width={120}
                     height={160}
                     loading="eager"
-                    className="h-9 w-auto sm:h-11 lg:h-12"
+                    className="h-10 w-auto sm:h-12 lg:h-14"
                   />
-                  <Wordmark className="h-8 w-auto sm:h-10 lg:h-11" />
+                  <Wordmark className="h-9 w-auto sm:h-11 lg:h-[52px]" />
                 </h1>
                 <p className="text-sm text-muted lg:text-base">
                   Interview coaching for Klingons.
                 </p>
                 {/* Mode: makes the capture scope explicit */}
                 <div
-                  className="mt-2.5 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs lg:text-sm"
+                  className="mt-6 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs lg:mt-7 lg:text-sm"
                   role="group"
                   aria-label="Capture mode"
                 >
