@@ -3,11 +3,12 @@
 // Morphology confidence for an already-generated Klingon rendering. Split out
 // from /api/answer so it runs off the visible answer's critical path: the app
 // shows the Klingon immediately, then calls this to resolve the confidence
-// marker. Delegates the actual analysis to the yajwiz validator function
-// (api/validate-klingon.py) via lib/klingon-validate.
+// marker AND the literal back-translation (reconstructed from the yajwiz parse,
+// never an LLM re-translation). Delegates the analysis to the validator
+// function (api/validate-klingon.py) via lib/klingon-validate.
 
 import { NextResponse } from "next/server";
-import { computeConfidence } from "@/lib/klingon-validate";
+import { verifyKlingon } from "@/lib/klingon-validate";
 import {
   KeyedSlidingWindow,
   SlidingWindow,
@@ -37,7 +38,10 @@ function selfOrigin(request: Request): string | null {
 export async function POST(request: Request) {
   if (!perIpLimiter.tryHit(clientIp(request)) || !globalLimiter.tryHit()) {
     // Rate-limited verification just leaves the answer unverified.
-    return NextResponse.json({ confidence: "low" }, { status: 429 });
+    return NextResponse.json(
+      { confidence: "low", backTranslation: "" },
+      { status: 429 }
+    );
   }
 
   let klingon: string;
@@ -65,15 +69,15 @@ export async function POST(request: Request) {
 
   const origin = selfOrigin(request);
   if (!origin) {
-    return NextResponse.json({ confidence: "low" });
+    return NextResponse.json({ confidence: "low", backTranslation: "" });
   }
 
   const signal = AbortSignal.timeout(TIMEOUT_MS);
   try {
-    const confidence = await computeConfidence(klingon, english, origin, signal);
-    return NextResponse.json({ confidence });
+    const result = await verifyKlingon(klingon, english, origin, signal);
+    return NextResponse.json(result);
   } catch {
     // Any failure (including timeout) means we couldn't verify → low confidence.
-    return NextResponse.json({ confidence: "low" });
+    return NextResponse.json({ confidence: "low", backTranslation: "" });
   }
 }

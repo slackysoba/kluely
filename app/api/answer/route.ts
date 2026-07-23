@@ -20,6 +20,13 @@ import { join } from "node:path";
 import { NextResponse } from "next/server";
 import { KLINGON_GRAMMAR_PRIMER } from "@/lib/klingon-grammar";
 import { nonKlingonTokens } from "@/lib/klingon-orthography";
+import {
+  backTranslate,
+  validateKlingon,
+  type Confidence,
+  type ValidationResult,
+  type ValidationWord,
+} from "@/lib/klingon-validate";
 import { toPiqad } from "@/lib/piqad";
 import {
   KeyedSlidingWindow,
@@ -31,10 +38,10 @@ import {
 const MODEL = "gemini-3.5-flash-lite";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 
-// One overall budget shared by the two grounded model calls. Morphology
-// validation runs separately (app/api/verify), off the visible answer's
-// critical path, so it doesn't count against this.
-const TIMEOUT_MS = 12_000;
+// Overall per-request budget. In the grounded (non-warp) path this now covers
+// generation AND the yajwiz validation + retry loop that GATES the output, so
+// it's higher than the warp path needs.
+const TIMEOUT_MS = 25_000;
 const MAX_QUESTION_LENGTH = 2_000;
 
 // Grounding knobs: cap how many verified roots each concept contributes and how
@@ -66,6 +73,8 @@ interface LexiconSense {
 
 interface Lexicon {
   englishToKlingon: Record<string, LexiconSense[]>;
+  // Keyed by Klingon lemma — used to reject non-canonical roots in validation.
+  klingonToEnglish: Record<string, LexiconSense[]>;
 }
 
 // Read from disk (traced into the bundle via next.config outputFileTracingIncludes)
@@ -79,9 +88,20 @@ const lexicon: Lexicon = (() => {
     return JSON.parse(raw) as Lexicon;
   } catch (err) {
     console.error("Failed to load Klingon lexicon:", err);
-    return { englishToKlingon: {} };
+    return { englishToKlingon: {}, klingonToEnglish: {} };
   }
 })();
+
+/** True if a Klingon lemma is a canonical (Okrand) root in the lexicon. */
+function isCanonRoot(lemma: string): boolean {
+  const senses = lexicon.klingonToEnglish[lemma];
+  return !!senses && senses.some((s) => s.canon);
+}
+
+/** True if a Klingon lemma is present in the lexicon at all (canon or not). */
+function isKnownRoot(lemma: string): boolean {
+  return !!lexicon.klingonToEnglish[lemma];
+}
 
 // Generic interview roots always offered to the Klingon step as a fallback
 // baseline, so it has verified material even when few answer concepts hit the
@@ -106,11 +126,18 @@ const SEED_CONCEPTS = [
 
 // Confidence is no longer part of generation: the client requests it
 // separately from /api/verify once the answer is on screen.
+// Grounded (non-warp) answers are validation-GATED server-side: confidence and
+// the parse-derived backTranslation are known before display, and validationMs
+// is the time spent in the yajwiz gate + retry loop. Warp answers come from one
+// fast call with an LLM backTranslation and no server validation (confidence is
+// set to "low" on the client).
 interface AnswerPayload {
   english: string;
   klingon: string;
   pIqaD: string;
-  backTranslation: string;
+  backTranslation?: string;
+  confidence?: Confidence;
+  validationMs?: number;
 }
 
 interface GeminiResponse {
@@ -182,19 +209,24 @@ The user message gives you:
 ABSOLUTE RULE — the "klingon" field must contain ONLY Klingon words. A raw English word (e.g. "clever", "project", "salmon") must NEVER appear. Every token must be spelled with Klingon letters. If you can't find or build a Klingon word, you STILL may not leave English — substitute the nearest available meaning instead.
 
 Hard rules:
-1. Content roots (nouns, verbs, adjectival verbs, adverbs): PREFER roots from the VERIFIED VOCABULARY list; do not pull other roots from the primer examples or your own memory. When a proposition needs a concrete word that is NOT already in the list, in this strict priority order:
+1. Content roots (nouns, verbs, adjectival verbs, adverbs): use ONLY roots from the VERIFIED VOCABULARY list. Do NOT pull roots from the primer examples or your own memory, and NEVER invent a Klingon-looking root (e.g. do not make up words like "tamghay"). Your output is checked by a morphological analyzer against the real dictionary; unknown roots are rejected. When a proposition needs a concrete word that is NOT already in the list, in this strict priority order:
    a. SUBSTITUTE first (almost always the answer): express the MEANING with the closest available verified word — a synonym, a broader category, or a short description built from available words. A word is only "untranslatable" if NO available word approximates its meaning. (Example: "clever" → use "val" = be clever/smart; "fish" → if absent, "animal" or "food"; "sour fruit" → "food" plus a quality.)
    b. LOANWORD — true last resort, ONLY after substitution genuinely fails: transliterate the English word PHONETICALLY into Klingon, using ONLY Klingon letters (consonants: b ch D gh H j l m n ng p q Q r S t tlh v w y ' ; vowels: a e I o u). A loanword is a Klingon-spelled approximation of the sound — it is NEVER the English word left in place. Use loanwords very sparingly.
    c. NEVER silently drop a concrete noun that carries the answer, and NEVER leave an English word. Substitute, or as a last resort, transliterate.
 2. You MAY freely use the grammatical apparatus described in the primer: verb prefixes, verb suffixes, noun suffixes, the pronouns (jIH, SoH, ghaH, 'oH, maH, tlhIH, chaH), conjunctions ('ej, 'ach, vaj, pagh, qoj, 'e'), numbers, and the fixed set phrases (Qapla', majQa', nuqneH, lu'/luq).
 3. Apply correct Klingon morphology (attach prefixes and suffixes per the primer) and strict OVS (Object–Verb–Subject) word order.
 4. Translate every proposition — keep the concrete content. Keep it tight; a faithful literal rendering beats a padded one.
-5. If the user message includes a CORRECTION section, it names the exact Klingon words to use in place of English words you previously left untranslated. You MUST use those words (they are approved) and remove every English token.
+5. If the user message includes a CORRECTION section, it lists exactly what a morphological analyzer rejected in your previous attempt (and often the correct Klingon words to use). You MUST fix every item it names.
 
-Return strict JSON with exactly two fields:
-  - "klingon": the rendering in Latin transcription, correct capitalization, OVS order. Every token must be a Klingon word.
-  - "backTranslation": a literal, structure-revealing English back-translation (deliberately awkward, revealing the Klingon structure). Preserve any loanword as-is and, in brackets, note what it stands for.
-Do NOT produce pIqaD; it is derived mechanically downstream.`;
+STRUCTURE RULES — these are checked mechanically and WILL be rejected:
+- WORD BOUNDARIES: put a SPACE between every separate word. Each space-separated token is ONE word (one root plus its affixes). Never mash an object noun and its verb into a single token — write "janDajmey vIghor" (his devices, I-break-them), NOT "janDajmeyvIghor". A noun and the verb that acts on it are ALWAYS separate words.
+- ONE ROOT PER WORD: a single word may contain only ONE content root plus prefixes/suffixes. Never join two verb roots (or two noun roots) into one token — "vIngeDtlhap" is illegal. To say "I take it because it is easy", use a legal structure like "ngeDmo' vItlhap" (because-it-is-easy, I-take-it), with "-mo'" (because) turning the first verb into its own word.
+- PLURAL SUFFIX BY NOUN CLASS: -pu' only for beings that can use language, -Du' only for body parts, -mey for everything else. A body part like "arm" (DeS) takes -Du' → "DeSDu'", never -pu'.
+- POSSESSIVE PERSON/NUMBER: match the possessor. their = -chaj, our = -maj, your(sg) = -lIj, your(pl) = -raj, his/her/its = -Daj, my = -wIj. Do not use -Daj (his/her) when the meaning is "their" (-chaj).
+
+Return strict JSON with exactly one field:
+  - "klingon": the rendering in Latin transcription, correct capitalization, OVS order, with SPACES between words. Every token must be a valid, dictionary-attested Klingon word.
+Do NOT produce pIqaD or a back-translation; both are derived mechanically downstream (pIqaD from the transcription, the literal back-translation from a morphological parse).`;
 
 const SCHEMA_KLINGON = {
   type: "OBJECT",
@@ -204,19 +236,16 @@ const SCHEMA_KLINGON = {
       description:
         "The answer in Klingon, Latin transcription, correct capitalization, OVS order, built only from the supplied vocabulary.",
     },
-    backTranslation: {
-      type: "STRING",
-      description:
-        "A literal, structure-revealing English back-translation of the Klingon.",
-    },
   },
-  required: ["klingon", "backTranslation"],
-  propertyOrdering: ["klingon", "backTranslation"],
+  required: ["klingon"],
+  propertyOrdering: ["klingon"],
 } as const;
 
-// Legacy single-call path — used only if the grounded flow can't produce a
-// valid result, so the demo degrades instead of hard-failing.
-const SYSTEM_LEGACY = `You are an elite interview coach. The user gives you an interview question. Write the strongest possible answer for a candidate to give: specific, confident, and structured — no filler, no "great question", no hedging. Two to three sentences.
+// Direct single-call path: one fast Gemini call producing the answer, its
+// Klingon, and an LLM back-translation together — the app's original ~single-
+// round-trip latency. Used for WARP mode, and as the fallback when grounded
+// generation fails.
+const SYSTEM_DIRECT = `You are an elite interview coach. The user gives you an interview question. Write the strongest possible answer for a candidate to give: specific, confident, and structured — no filler, no "great question", no hedging. Two to three sentences.
 
 Then render that answer in Klingon according to the primer below.
 
@@ -224,7 +253,7 @@ One override to the primer's output requirements: do NOT produce the pIqaD field
 
 ${KLINGON_GRAMMAR_PRIMER}`;
 
-const SCHEMA_LEGACY = {
+const SCHEMA_DIRECT = {
   type: "OBJECT",
   properties: {
     english: { type: "STRING" },
@@ -421,19 +450,157 @@ function propositionTerms(propositions: string[]): string[] {
   return terms;
 }
 
-/** Retry instructions naming the correct Klingon word for each leaked token. */
-function buildCorrection(leaked: string[]): string {
-  const lines = leaked.map((token) => {
+/** Correction lines for raw-English tokens, naming the correct Klingon word. */
+function englishLeakLines(leaked: string[]): string[] {
+  return leaked.map((token) => {
     const matches = lexiconMatches(token.toLowerCase(), 2);
     if (matches.length > 0) {
       const options = matches
         .map((m) => `"${m.klingon}" (${m.gloss})`)
         .join(" or ");
-      return `- You left the English word "${token}". Use the Klingon word ${options} instead.`;
+      return `You left the English word "${token}" — use the Klingon word ${options} instead.`;
     }
-    return `- You left the English word "${token}". There is no dictionary word for it — express its meaning with available vocabulary, or as a last resort transliterate it phonetically into Klingon letters. Do NOT leave the English word.`;
+    return `You left the English word "${token}" — express its meaning with available vocabulary, or transliterate it phonetically into Klingon letters. Do NOT leave the English word.`;
   });
-  return `CORRECTION — your previous attempt left non-Klingon (English) tokens in the output. Every token must be a Klingon word. Fix these and re-render:\n${lines.join("\n")}`;
+}
+
+// ---------------------------------------------------------------------------
+// Validation gate (yajwiz parse + structural checks)
+// ---------------------------------------------------------------------------
+
+const PLURAL_SUFFIXES = ["pu'", "Du'", "mey"];
+const POSSESSIVE_INTENT: { pattern: RegExp; suffix: string; label: string }[] = [
+  { pattern: /\btheir\b/, suffix: "chaj", label: "their" },
+  { pattern: /\bour\b/, suffix: "maj", label: "our" },
+];
+
+/** boQwI' noun class from a part_of_speech string like "n:body,klcp1". */
+function nounClass(boqwizPos: string | null | undefined): "body" | "being" | "other" {
+  if (!boqwizPos) return "other";
+  const tags = boqwizPos.split(/[:,]/).map((t) => t.trim());
+  if (tags.includes("body")) return "body";
+  if (tags.includes("being")) return "being";
+  return "other";
+}
+
+/** Bare surface suffixes on a word's top analysis (hyphens stripped). */
+function usedSuffixes(word: ValidationWord): string[] {
+  return (word.analyses?.[0]?.suffixes ?? []).map((s) =>
+    s.replace(/[^A-Za-z']/g, "")
+  );
+}
+
+/**
+ * Structural + morphological problems found by the yajwiz parse: unparseable
+ * tokens (invented roots, run-on words, verb-verb compounds), ungrammatical
+ * morphology, non-canonical roots, wrong plural-by-class, and possessive
+ * person/number mismatches. `skip` holds tokens already reported as raw English.
+ * Returns one correction sentence per problem (no leading bullet).
+ */
+function gateProblems(
+  v: ValidationResult,
+  propositions: string[],
+  skip: Set<string>
+): string[] {
+  const problems: string[] = [];
+  const unparseable: string[] = [];
+  const ungrammatical: string[] = [];
+  const nonCanon: string[] = [];
+
+  for (const word of v.words) {
+    if (skip.has(word.word)) continue;
+    const a = word.analyses?.[0];
+
+    if (word.parses === false) {
+      unparseable.push(word.word);
+      continue;
+    }
+    if (!word.valid) {
+      ungrammatical.push(word.word);
+      continue;
+    }
+    if (!a) continue;
+
+    const lemma = a.lemma ?? "";
+    if (
+      (a.pos === "N" || a.pos === "V") &&
+      lemma &&
+      isKnownRoot(lemma) &&
+      !isCanonRoot(lemma)
+    ) {
+      nonCanon.push(`${word.word} (root "${lemma}")`);
+    }
+
+    if (a.pos === "N") {
+      const used = PLURAL_SUFFIXES.find((p) => usedSuffixes(word).includes(p));
+      if (used) {
+        const cls = nounClass(a.boqwizPos);
+        const expected = cls === "body" ? "Du'" : cls === "being" ? "pu'" : "mey";
+        if (used !== expected) {
+          const kind =
+            cls === "body"
+              ? "body part"
+              : cls === "being"
+                ? "language-capable being"
+                : "ordinary noun";
+          problems.push(
+            `"${word.word}" (${lemma}) is a ${kind}; its plural suffix must be -${expected}, not -${used}.`
+          );
+        }
+      }
+    }
+  }
+
+  if (unparseable.length > 0) {
+    problems.push(
+      `These tokens are not valid Klingon words (the analyzer could not parse them): ${unparseable.join(", ")}. ` +
+        `Usually the cause is (a) two words mashed together with no space — put a SPACE between the object noun and its verb, e.g. "janDajmey vIghor" not "janDajmeyvIghor"; ` +
+        `(b) two roots compounded into one token — use a legal structure with a suffix like -mo' ("because") or separate clauses, e.g. "ngeDmo' vItlhap" not "vIngeDtlhap"; ` +
+        `or (c) an invented root — replace it with a word from the verified vocabulary.`
+    );
+  }
+  if (ungrammatical.length > 0) {
+    problems.push(
+      `These words parse but are grammatically wrong (bad prefix/suffix combination): ${ungrammatical.join(", ")}. Fix their morphology per the primer.`
+    );
+  }
+  if (nonCanon.length > 0) {
+    problems.push(
+      `These roots are not canonical Klingon: ${nonCanon.join(", ")}. Replace each with a word from the verified vocabulary.`
+    );
+  }
+
+  // Possessive person/number (heuristic against the intended English).
+  const intent = propositions.join(" ").toLowerCase();
+  const suffixesInUse = new Set<string>();
+  for (const word of v.words) {
+    for (const s of usedSuffixes(word)) suffixesInUse.add(s);
+  }
+  for (const poss of POSSESSIVE_INTENT) {
+    if (
+      poss.pattern.test(intent) &&
+      suffixesInUse.has("Daj") &&
+      !suffixesInUse.has(poss.suffix)
+    ) {
+      problems.push(
+        `The answer is about something belonging to "${poss.label}", but the Klingon uses -Daj (his/her/its). Use the possessive suffix -${poss.suffix} (${poss.label}) instead.`
+      );
+    }
+  }
+
+  return problems;
+}
+
+/** Best deployment origin for the internal call to the validator function. */
+function selfOrigin(request: Request): string | null {
+  if (process.env.VERCEL_URL) {
+    return `https://${process.env.VERCEL_URL}`;
+  }
+  try {
+    return new URL(request.url).origin;
+  } catch {
+    return null;
+  }
 }
 
 /** Human-readable part of speech for the vocabulary list. */
@@ -475,7 +642,7 @@ async function generateKlingon(
   apiKey: string,
   signal: AbortSignal,
   correction = ""
-): Promise<{ klingon: string; backTranslation: string } | null> {
+): Promise<{ klingon: string } | null> {
   const corrections = correction ? `\n\n${correction}` : "";
   const userText = `VERIFIED VOCABULARY (klingon — gloss [part of speech]) — prefer these content roots:
 ${formatVocabulary(vocab)}
@@ -493,20 +660,15 @@ ${propositions.map((p, i) => `${i + 1}. ${p}`).join("\n")}${corrections}`;
   if (!obj) {
     return null;
   }
-  const { klingon, backTranslation } = obj;
-  if (
-    typeof klingon === "string" &&
-    klingon.length > 0 &&
-    typeof backTranslation === "string" &&
-    backTranslation.length > 0
-  ) {
-    return { klingon, backTranslation };
+  const { klingon } = obj;
+  if (typeof klingon === "string" && klingon.length > 0) {
+    return { klingon };
   }
   return null;
 }
 
 // ---------------------------------------------------------------------------
-// Grounded flow (generate and return immediately; validation is separate)
+// Grounded flow (generate → validate → correct/retry → gated output)
 // ---------------------------------------------------------------------------
 
 /**
@@ -516,29 +678,29 @@ ${propositions.map((p, i) => `${i + 1}. ${p}`).join("\n")}${corrections}`;
  */
 function toAnswerPayload(
   english: string,
-  kl: { klingon: string; backTranslation: string }
+  klingon: string,
+  extra?: Partial<AnswerPayload>
 ): AnswerPayload {
   return {
     english,
-    klingon: kl.klingon,
-    pIqaD: toPiqad(kl.klingon),
-    backTranslation: kl.backTranslation,
+    klingon,
+    pIqaD: toPiqad(klingon),
+    ...extra,
   };
 }
 
 /**
- * Orchestrates the simplify-then-translate flow into a full payload.
- *
- * `warp` keeps the cheap, high-value prompt steps (grounding, simplify-then-
- * translate, substitution) but skips the expensive verification: the raw-
- * English leak scan and its retry loop here, and — decided on the client — the
- * async yajwiz validation. It returns the first grounded generation directly.
+ * Non-warp path: grounded simplify-then-translate, then GATE the output on the
+ * yajwiz morphological parse. Each attempt is validated; if any word fails to
+ * parse or violates the structural checks, we retry with a specific correction.
+ * The answer is only returned once it passes (high confidence) or attempts are
+ * exhausted (best effort, low confidence). Validation is on the critical path.
  */
 async function generateGroundedAnswer(
   question: string,
   apiKey: string,
   signal: AbortSignal,
-  warp: boolean
+  origin: string | null
 ): Promise<AnswerPayload | null> {
   let ec:
     | { english: string; propositions: string[]; concepts: string[] }
@@ -559,21 +721,15 @@ async function generateGroundedAnswer(
     ...SEED_CONCEPTS,
   ]);
 
-  if (warp) {
-    // Warp: skip the leak scan and retry loop; return the first generation
-    // (still allow a re-ask only if the model returns unparseable JSON).
-    let kl: { klingon: string; backTranslation: string } | null = null;
-    for (let attempt = 0; attempt < 2 && !kl; attempt++) {
-      kl = await generateKlingon(ec.propositions, vocab, apiKey, signal);
-    }
-    return kl ? toAnswerPayload(ec.english, kl) : null;
-  }
-
-  // Translate the simplified propositions (not the polished answer). Hard-check
-  // for raw-English leaks with a cheap local orthography scan; on a leak, name
-  // the correct Klingon word for each token and retry.
-  let kl: { klingon: string; backTranslation: string } | null = null;
+  let best: {
+    klingon: string;
+    problems: number;
+    validation: ValidationResult | null;
+  } | null = null;
   let correction = "";
+  let validationMs = 0;
+  let validatorSeen = false;
+
   for (let attempt = 0; attempt < MAX_KLINGON_ATTEMPTS; attempt++) {
     const candidate = await generateKlingon(
       ec.propositions,
@@ -585,12 +741,42 @@ async function generateGroundedAnswer(
     if (!candidate) {
       continue; // Malformed JSON; retry if attempts remain.
     }
-    kl = candidate; // Best effort so far.
+
+    // Cheap local raw-English scan (works even where the validator can't run).
     const leaked = nonKlingonTokens(candidate.klingon);
-    if (leaked.length === 0) {
-      break; // Every token is Klingon — done.
+
+    // yajwiz parse (server-to-server). Null when the validator is unreachable.
+    let validation: ValidationResult | null = null;
+    if (origin) {
+      const started = performance.now();
+      validation = await validateKlingon(candidate.klingon, origin, signal);
+      validationMs += performance.now() - started;
+      if (validation) validatorSeen = true;
     }
-    // Make the correct words available and instruct the model to use them.
+
+    const lines: string[] = [];
+    if (leaked.length > 0) lines.push(...englishLeakLines(leaked));
+    if (validation) {
+      lines.push(...gateProblems(validation, ec.propositions, new Set(leaked)));
+    }
+
+    if (!best || lines.length < best.problems) {
+      best = { klingon: candidate.klingon, problems: lines.length, validation };
+    }
+
+    // Passed the gate — but "high" requires the validator to have actually run.
+    if (lines.length === 0) {
+      if (validation) {
+        return toAnswerPayload(ec.english, candidate.klingon, {
+          confidence: "high",
+          backTranslation: backTranslate(validation),
+          validationMs: Math.round(validationMs),
+        });
+      }
+      break; // Clean but unvalidated (validator down) → fall through to "low".
+    }
+
+    // Make the correct words available for any raw-English leak, then correct.
     for (const token of leaked) {
       for (const match of lexiconMatches(token.toLowerCase(), 2)) {
         if (
@@ -600,24 +786,38 @@ async function generateGroundedAnswer(
         }
       }
     }
-    correction = buildCorrection(leaked);
+    correction = `CORRECTION — a Klingon morphological analyzer rejected your previous attempt. Fix EVERY item below and re-render (keep spaces between words):\n${lines
+      .map((l) => `- ${l}`)
+      .join("\n")}`;
   }
-  if (!kl) {
+
+  if (!best) {
     return null;
   }
-  return toAnswerPayload(ec.english, kl);
+  // Exhausted attempts (or unvalidated): best effort, flagged low confidence.
+  return toAnswerPayload(ec.english, best.klingon, {
+    confidence: "low",
+    backTranslation: best.validation
+      ? backTranslate(best.validation)
+      : undefined,
+    validationMs: validatorSeen ? Math.round(validationMs) : undefined,
+  });
 }
 
-/** Fallback: the previous single-call generation, for graceful degradation. */
-async function generateLegacyAnswer(
+/**
+ * Direct single-call generation — the app's original fast path: the English
+ * answer, its Klingon, and an LLM back-translation in one Gemini call. Warp
+ * mode's primary path, and the fallback when grounded generation fails.
+ */
+async function generateDirectAnswer(
   question: string,
   apiKey: string,
   signal: AbortSignal
 ): Promise<AnswerPayload | null> {
   const obj = await callGemini(
-    SYSTEM_LEGACY,
+    SYSTEM_DIRECT,
     question,
-    SCHEMA_LEGACY,
+    SCHEMA_DIRECT,
     apiKey,
     signal
   );
@@ -687,21 +887,19 @@ export async function POST(request: Request) {
 
   const signal = AbortSignal.timeout(TIMEOUT_MS);
   try {
-    // Primary: grounded, lexicon-backed generation. Returns immediately; the
-    // client verifies morphology separately via /api/verify (skipped under warp).
-    const grounded = await generateGroundedAnswer(
-      question,
-      apiKey,
-      signal,
-      warp
-    );
-    if (grounded) {
-      return NextResponse.json(grounded);
+    // Warp: one fast ungrounded call (the app's original ~single-round-trip
+    // path), no validation. Otherwise the grounded pipeline, whose output is
+    // GATED server-side on the yajwiz parse (validate → correct → retry).
+    const primary = warp
+      ? await generateDirectAnswer(question, apiKey, signal)
+      : await generateGroundedAnswer(question, apiKey, signal, selfOrigin(request));
+    if (primary) {
+      return NextResponse.json(primary);
     }
     // Degrade rather than fail: fall back to the single-call generation.
-    const legacy = await generateLegacyAnswer(question, apiKey, signal);
-    if (legacy) {
-      return NextResponse.json(legacy);
+    const fallback = await generateDirectAnswer(question, apiKey, signal);
+    if (fallback) {
+      return NextResponse.json(fallback);
     }
   } catch (err) {
     if (err instanceof DOMException && err.name === "TimeoutError") {

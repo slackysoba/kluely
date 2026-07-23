@@ -16,11 +16,21 @@ const MEANING_ALIGNMENT_MIN = 0.25;
 
 export type Confidence = "high" | "low";
 
-interface ValidationAnalysis {
+export interface ValidationMorpheme {
+  text?: string | null;
+  pos?: string | null;
   gloss?: string | null;
-  morphemes?: { gloss?: string | null }[];
 }
-interface ValidationWord {
+export interface ValidationAnalysis {
+  lemma?: string | null;
+  pos?: string | null; // "N" | "V" | "OTHER"
+  boqwizPos?: string | null; // e.g. "n:body,klcp1" — carries noun class
+  gloss?: string | null;
+  prefix?: string | null;
+  suffixes?: string[];
+  morphemes?: ValidationMorpheme[];
+}
+export interface ValidationWord {
   word: string;
   valid: boolean;
   // false when the analyzer found no analysis at all (unknown root) — the
@@ -29,7 +39,7 @@ interface ValidationWord {
   parses?: boolean;
   analyses?: ValidationAnalysis[];
 }
-interface ValidationResult {
+export interface ValidationResult {
   words: ValidationWord[];
 }
 
@@ -48,7 +58,7 @@ function acceptableWord(w: ValidationWord): boolean {
 }
 
 /** Calls the Python validator. Best-effort: returns null on any failure. */
-async function validateKlingon(
+export async function validateKlingon(
   klingon: string,
   origin: string,
   signal: AbortSignal
@@ -114,24 +124,107 @@ function meaningAligned(english: string, v: ValidationResult): boolean {
   return overlap / meaning.size >= MEANING_ALIGNMENT_MIN || overlap >= 3;
 }
 
+// Verb/noun prefix meanings (Okrand's paradigm). Used to reveal subject→object
+// in the morphological back-translation. Unmapped prefixes fall back to their
+// surface form, so we never assert a meaning we're unsure of.
+const PREFIX_GLOSS: Record<string, string> = {
+  jI: "I",
+  bI: "you",
+  ma: "we",
+  Su: "you(pl)",
+  vI: "I→it",
+  qa: "I→you",
+  Sa: "I→you(pl)",
+  wI: "we→it",
+  pI: "we→you",
+  re: "we→you(pl)",
+  Da: "you→it",
+  cho: "you→me",
+  ju: "you→us",
+  bo: "you(pl)→it",
+  tu: "you(pl)→me",
+  che: "you(pl)→us",
+  mu: "he/it→me",
+  Du: "he/it→you",
+  nu: "he/it→us",
+  lI: "he/it→you(pl)",
+  lu: "they→it",
+  nI: "they→you(pl)",
+  yI: "you!",
+  HI: "you→me!",
+  gho: "you→us!",
+  tI: "you→them!",
+  pe: "you(pl)!",
+};
+
+/** Compact form of a boQwI' gloss: first sense, parentheticals removed. */
+function shortGloss(gloss: string): string {
+  return gloss
+    .split(/[;,]/)[0]
+    .replace(/\([^)]*\)/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Morpheme-by-morpheme gloss of one analyzed word, from the yajwiz parse. */
+function wordGloss(word: ValidationWord): string {
+  const analysis = word.analyses?.[0];
+  // Unknown to the analyzer (a loanword) — keep the coined word verbatim.
+  if (!analysis) {
+    return word.word;
+  }
+  const segments: string[] = [];
+  if (analysis.prefix) {
+    const key = analysis.prefix.replace(/[^A-Za-z']/g, "");
+    if (key) segments.push(PREFIX_GLOSS[key] ?? `${key}-`);
+  }
+  const morphemes = analysis.morphemes ?? [];
+  if (morphemes.length > 0) {
+    for (const m of morphemes) {
+      const g = m.gloss ? shortGloss(m.gloss) : (m.text ?? "").trim();
+      if (g) segments.push(g);
+    }
+  } else {
+    const g = analysis.gloss
+      ? shortGloss(analysis.gloss)
+      : (analysis.lemma ?? word.word);
+    if (g) segments.push(g);
+  }
+  return segments.join("-") || word.word;
+}
+
 /**
- * Resolves a confidence signal for a Klingon rendering. "high" when every word
- * is acceptable — valid Klingon morphology or a properly-formed loanword — with
- * at least one genuinely valid word (so an all-loanword string can't pass), AND
- * the validated meaning tracks the intended English. Otherwise (including when
- * the validator can't be reached) "low", so we never over-claim verification.
+ * A literal, structure-revealing back-translation built strictly from the
+ * yajwiz morphological parse (root + affix glosses, in Klingon word order) —
+ * never an LLM re-translation.
  */
-export async function computeConfidence(
+export function backTranslate(v: ValidationResult): string {
+  return v.words.map(wordGloss).join(" ").trim();
+}
+
+/**
+ * Verifies a Klingon rendering against the yajwiz parse, returning both the
+ * confidence signal and the parse-derived literal back-translation.
+ *
+ * Confidence is "high" when every word is acceptable — valid Klingon morphology
+ * or a properly-formed loanword — with at least one genuinely valid word (so an
+ * all-loanword string can't pass), AND the validated meaning tracks the intended
+ * English. Otherwise (including when the validator can't be reached) "low", and
+ * the back-translation is whatever the parse yielded (empty when unavailable).
+ */
+export async function verifyKlingon(
   klingon: string,
   english: string,
   origin: string,
   signal: AbortSignal
-): Promise<Confidence> {
+): Promise<{ confidence: Confidence; backTranslation: string }> {
   const v = await validateKlingon(klingon, origin, signal);
   if (!v || v.words.length === 0) {
-    return "low";
+    return { confidence: "low", backTranslation: "" };
   }
   const morphologyOk =
     v.words.every(acceptableWord) && v.words.some((w) => w.valid);
-  return morphologyOk && meaningAligned(english, v) ? "high" : "low";
+  const confidence: Confidence =
+    morphologyOk && meaningAligned(english, v) ? "high" : "low";
+  return { confidence, backTranslation: backTranslate(v) };
 }

@@ -43,10 +43,10 @@ const E2E_WINDOW = 50;
 // Info-tooltip copy for each sidebar latency metric.
 const METRIC_INFO = {
   endToEnd:
-    "Generation latency: time from when you stop speaking to the Klingon " +
-    "answer appearing on screen — transcription, the language model generating " +
-    "the Klingon, and rendering. Morphology verification is measured separately " +
-    "(see Validation) and does not delay this.",
+    "Total latency: time from when you stop speaking to the Klingon answer " +
+    "appearing on screen — transcription, the language model, the morphology " +
+    "validation gate (which can trigger a corrective retry), and rendering. " +
+    "The Validation metric breaks out the validation portion of this.",
   wordEmission:
     "Median time from when a word finishes in your audio to when it appears " +
     "as transcribed text, measured in the browser. This uses AssemblyAI's " +
@@ -58,10 +58,10 @@ const METRIC_INFO = {
     "complete (end_of_turn). Reflects Universal-Streaming's endpointing and " +
     "turn-detection speed.",
   validation:
-    "Verification latency: time from the Klingon appearing on screen to the " +
-    "morphology analyzer confirming it and the verified/unverified marker " +
-    "resolving. Runs asynchronously after the answer, so it never delays what " +
-    "you see.",
+    "Validation latency: the portion of end-to-end spent in the yajwiz " +
+    "morphology gate — parsing the generated Klingon and, if it fails a check, " +
+    "regenerating with a correction. This GATES the answer (it must pass, or " +
+    "exhaust retries, before display). Warp mode skips it entirely.",
 } as const;
 
 /** Rounded median (p50) of a sample window, or null when it's empty. */
@@ -166,7 +166,12 @@ interface AnswerPayload {
   english: string;
   klingon: string;
   pIqaD: string;
-  backTranslation: string;
+  // Warp answers carry an LLM Literal and no confidence. Grounded answers are
+  // validation-gated server-side, so they carry the parse-derived Literal, a
+  // confidence signal, and the time spent in the validation gate.
+  backTranslation?: string;
+  confidence?: "high" | "low";
+  validationMs?: number;
 }
 
 // Async morphology-verification state for the current answer. "pending" while
@@ -200,8 +205,7 @@ function isAnswerPayload(data: unknown): data is AnswerPayload {
   return (
     typeof record.english === "string" &&
     typeof record.klingon === "string" &&
-    typeof record.pIqaD === "string" &&
-    typeof record.backTranslation === "string"
+    typeof record.pIqaD === "string"
   );
 }
 
@@ -671,10 +675,8 @@ export default function Home() {
   // when the last final turn fired, plus its rolling sample window.
   const turnEndAtRef = useRef<number | null>(null);
   const e2eSamplesRef = useRef<number[]>([]);
-  // Async morphology verification runs after the answer paints; its own abort
-  // controller and rolling sample window keep validation latency distinct from
-  // generation latency (end-to-end).
-  const verifyAbortRef = useRef<AbortController | null>(null);
+  // The server reports how long the validation gate took (grounded path); its
+  // rolling window keeps validation latency distinct from generation latency.
   const validationSamplesRef = useRef<number[]>([]);
 
   const [mode, setMode] = useState<CaptureMode>("practice");
@@ -697,6 +699,10 @@ export default function Home() {
   const [answerLoading, setAnswerLoading] = useState(false);
   const [answerError, setAnswerError] = useState<AnswerError | null>(null);
   const [confidence, setConfidence] = useState<Confidence | null>(null);
+  // Literal back-translation, reconstructed from the yajwiz parse and returned
+  // by /api/verify — so it resolves a moment after the answer, alongside the
+  // confidence marker. Null until it arrives (and stays null under warp).
+  const [backTranslation, setBackTranslation] = useState<string | null>(null);
   // Warp drive bypasses the expensive validation/retry steps. Mirrored into a
   // ref so requestAnswer can read the latest value without being recreated.
   const [warp, setWarp] = useState(false);
@@ -771,68 +777,14 @@ export default function Home() {
     }
   }, []);
 
-  // Verify the rendered Klingon's morphology out-of-band, then resolve the
-  // confidence marker. Measures its own latency so validation time stays
-  // separate from generation time. A newer answer supersedes an in-flight check.
-  const verifyAnswer = useCallback(
-    async (klingon: string, english: string) => {
-      verifyAbortRef.current?.abort();
-      const controller = new AbortController();
-      verifyAbortRef.current = controller;
-      setConfidence("pending");
-      const startedAt = performance.now();
-
-      try {
-        const res = await fetch("/api/verify", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ klingon, english }),
-          signal: controller.signal,
-        });
-        if (verifyAbortRef.current !== controller) {
-          return; // A newer answer's verification owns the marker now.
-        }
-        let resolved: Confidence = "low";
-        if (res.ok) {
-          const data = (await res.json().catch(() => null)) as {
-            confidence?: unknown;
-          } | null;
-          if (data?.confidence === "high" || data?.confidence === "low") {
-            resolved = data.confidence;
-          }
-        }
-        if (verifyAbortRef.current !== controller) {
-          return;
-        }
-        setConfidence(resolved);
-        // Validation latency: answer-on-screen → marker resolved.
-        const samples = validationSamplesRef.current;
-        samples.push(performance.now() - startedAt);
-        if (samples.length > E2E_WINDOW) {
-          samples.shift();
-        }
-        setValidationMs(median(samples));
-      } catch (err) {
-        if (err instanceof DOMException && err.name === "AbortError") {
-          return; // Superseded; the newer check owns the marker.
-        }
-        if (verifyAbortRef.current === controller) {
-          setConfidence("low"); // Couldn't verify — honestly unverified.
-        }
-      }
-    },
-    []
-  );
-
   // Fired only for finalized turns (end_of_turn: true) — never partials.
   // A newer final cancels any in-flight request instead of racing it.
   const requestAnswer = useCallback(
     async (question: string) => {
       answerAbortRef.current?.abort();
-      // A new answer invalidates any pending verification and its marker.
-      verifyAbortRef.current?.abort();
-      verifyAbortRef.current = null;
+      // A new answer clears the previous marker, Literal, and validation time.
       setConfidence(null);
+      setBackTranslation(null);
       const controller = new AbortController();
       answerAbortRef.current = controller;
       setAnswerLoading(true);
@@ -862,12 +814,19 @@ export default function Home() {
           setAnswer(null);
         } else {
           setAnswer(data);
-          if (warpEngaged) {
-            // Warp skipped validation entirely — it's honestly unverified.
-            setConfidence("low");
-          } else {
-            // Show the Klingon immediately, then verify it asynchronously.
-            void verifyAnswer(data.klingon, data.english);
+          // The grounded response is already validation-GATED server-side, so
+          // confidence, the parse-derived Literal, and validation time arrive
+          // with it. Warp answers carry an LLM Literal and no confidence, so
+          // they read as unverified.
+          setConfidence(data.confidence ?? "low");
+          setBackTranslation(data.backTranslation ?? null);
+          if (typeof data.validationMs === "number") {
+            const samples = validationSamplesRef.current;
+            samples.push(data.validationMs);
+            if (samples.length > E2E_WINDOW) {
+              samples.shift();
+            }
+            setValidationMs(median(samples));
           }
         }
         setAnswerLoading(false);
@@ -882,7 +841,7 @@ export default function Home() {
         }
       }
     },
-    [verifyAnswer]
+    []
   );
 
   const stopPipeline = useCallback(async () => {
@@ -894,14 +853,13 @@ export default function Home() {
     archiveCurrent();
     answerAbortRef.current?.abort();
     answerAbortRef.current = null;
-    verifyAbortRef.current?.abort();
-    verifyAbortRef.current = null;
     setRunning(false);
     setLevels(FLAT_LEVELS);
     setCurrentQuestion("");
     setPartial("");
     setAnswer(null);
     setConfidence(null);
+    setBackTranslation(null);
     setAnswerLoading(false);
     // Stop the mic first so no audio is sent while the session terminates.
     if (capture) {
@@ -926,11 +884,10 @@ export default function Home() {
     turnEndAtRef.current = null;
     e2eSamplesRef.current = [];
     validationSamplesRef.current = [];
-    verifyAbortRef.current?.abort();
-    verifyAbortRef.current = null;
     setElapsedMs(0);
     setAnswer(null);
     setConfidence(null);
+    setBackTranslation(null);
     setAnswerError(null);
     setAnswerLoading(false);
 
@@ -1219,6 +1176,7 @@ export default function Home() {
                       loading={answerLoading}
                       error={answerError}
                       confidence={confidence}
+                      backTranslation={backTranslation}
                       onRetry={retryAnswer}
                       fade={fade}
                     />
@@ -1420,6 +1378,7 @@ function AnswerStage({
   loading,
   error,
   confidence,
+  backTranslation,
   onRetry,
   fade,
 }: {
@@ -1427,6 +1386,7 @@ function AnswerStage({
   loading: boolean;
   error: AnswerError | null;
   confidence: Confidence | null;
+  backTranslation: string | null;
   onRetry: () => void;
   fade: object;
 }) {
@@ -1492,9 +1452,18 @@ function AnswerStage({
           <p className="piqad text-2xl leading-snug text-accent sm:text-3xl lg:text-4xl">
             {answer.pIqaD}
           </p>
-          <p className="text-xs leading-5 text-faint">
-            Literal: {answer.backTranslation}
-          </p>
+          {/* Literal: the parse-derived version (backTranslation, non-warp) when
+              it arrives, else the answer's own LLM back-translation (warp's fast
+              path includes one). "parsing…" bridges the non-warp wait. */}
+          {(backTranslation ?? answer.backTranslation) ? (
+            <p className="text-xs leading-5 text-faint">
+              Literal: {backTranslation ?? answer.backTranslation}
+            </p>
+          ) : confidence === "pending" ? (
+            <p className="text-xs italic leading-5 text-faint/70">
+              Literal: parsing…
+            </p>
+          ) : null}
           <div className="flex flex-col gap-1.5 border-t border-line/60 pt-4">
             <StageLabel>Suggested (EN)</StageLabel>
             <p className="text-sm leading-6 text-muted">{answer.english}</p>
