@@ -42,6 +42,11 @@ const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MO
 // generation AND the yajwiz validation + retry loop that GATES the output, so
 // it's higher than the warp path needs.
 const TIMEOUT_MS = 25_000;
+// Warp is a single ungrounded call — no simplification, no lexicon grounding,
+// no validation, no retries. It gets its own tight budget so it never waits on
+// the grounded pipeline's much larger timeout; if the one call can't answer
+// quickly, failing fast (and letting the user retry) beats stalling.
+const WARP_TIMEOUT_MS = 12_000;
 const MAX_QUESTION_LENGTH = 2_000;
 
 // Grounding knobs: cap how many verified roots each concept contributes and how
@@ -829,11 +834,21 @@ async function generateDirectAnswer(
     typeof english === "string" &&
     english.length > 0 &&
     typeof klingon === "string" &&
-    klingon.length > 0 &&
-    typeof backTranslation === "string" &&
-    backTranslation.length > 0
+    klingon.length > 0
   ) {
-    return { english, klingon, pIqaD: toPiqad(klingon), backTranslation };
+    const payload: AnswerPayload = {
+      english,
+      klingon,
+      pIqaD: toPiqad(klingon),
+    };
+    // The literal is a cheap by-product of the SAME call, so keep it when the
+    // model returns it (this is what shows the "Literal:" line under warp). But
+    // never reject the answer — or fall through to a second, slower call — just
+    // because the literal is missing: the Klingon is what warp is here to emit.
+    if (typeof backTranslation === "string" && backTranslation.length > 0) {
+      payload.backTranslation = backTranslation;
+    }
+    return payload;
   }
   return null;
 }
@@ -885,14 +900,34 @@ export async function POST(request: Request) {
     );
   }
 
-  const signal = AbortSignal.timeout(TIMEOUT_MS);
+  const signal = AbortSignal.timeout(warp ? WARP_TIMEOUT_MS : TIMEOUT_MS);
   try {
-    // Warp: one fast ungrounded call (the app's original ~single-round-trip
-    // path), no validation. Otherwise the grounded pipeline, whose output is
-    // GATED server-side on the yajwiz parse (validate → correct → retry).
-    const primary = warp
-      ? await generateDirectAnswer(question, apiKey, signal)
-      : await generateGroundedAnswer(question, apiKey, signal, selfOrigin(request));
+    if (warp) {
+      // Warp is the absolute-minimum path: ONE ungrounded Gemini call that
+      // takes the question straight to English + Klingon (plus a free literal),
+      // with no simplification, lexicon grounding, validation, or retry loop —
+      // nothing between the answer and the screen. It deliberately does NOT
+      // fall through to the grounded pipeline: warp's whole point is speed, so
+      // if the single call fails we return an error and let the user retry
+      // rather than quietly running the slow path they turned off.
+      const answer = await generateDirectAnswer(question, apiKey, signal);
+      if (answer) {
+        return NextResponse.json(answer);
+      }
+      return NextResponse.json(
+        { error: "Failed to generate answer" },
+        { status: 502 }
+      );
+    }
+
+    // Grounded (warp off): the simplify → ground → validate → correct → retry
+    // pipeline, GATED server-side on the yajwiz parse.
+    const primary = await generateGroundedAnswer(
+      question,
+      apiKey,
+      signal,
+      selfOrigin(request)
+    );
     if (primary) {
       return NextResponse.json(primary);
     }

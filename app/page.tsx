@@ -30,7 +30,7 @@ const FLAT_LEVELS = new Array<number>(WAVE_BARS).fill(0);
 const DONATION_URL = "https://buy.stripe.com/14A5kEg8HeQs1MrdLE28800";
 
 const DOWNLOAD_URL =
-  "https://github.com/slackysoba/kluely/releases/download/0.1/Kluely_0.1.0_x64_en-US.msi";
+  "https://github.com/slackysoba/kluely/releases/download/v1.0.0/Kluely_1.0.0_x64_en-US.msi";
 
 // The desktop shell (src-tauri) appends this marker to the webview user agent.
 // Its presence means we're already inside the installed app, so the
@@ -125,6 +125,39 @@ function useIsDesktopBrowser(): boolean {
   return isDesktop;
 }
 
+/**
+ * Left-clicking a `target="_blank"` link does nothing inside the Tauri desktop
+ * shell: WebView2 doesn't surface a plain link click as a new-window request
+ * the way a browser tab does, so the shell's Rust `on_new_window` handler (which
+ * routes external links to the system browser) never fires. A scripted
+ * `window.open` on that same click IS surfaced as a new-window request, so the
+ * handler catches it and Stripe (etc.) opens in the browser.
+ *
+ * We only override the plain primary-button click inside the desktop app —
+ * detected by the `KluelyDesktop` UA marker. In a real browser, and for
+ * modifier/middle clicks or the context menu, this is a no-op and the native
+ * `target="_blank"` behaviour is left untouched.
+ */
+function handleDesktopExternalClick(
+  event: React.MouseEvent<HTMLAnchorElement>
+) {
+  if (
+    event.defaultPrevented ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey
+  ) {
+    return;
+  }
+  if (!navigator.userAgent.includes(DESKTOP_APP_UA_MARKER)) {
+    return;
+  }
+  event.preventDefault();
+  window.open(event.currentTarget.href, "_blank", "noopener,noreferrer");
+}
+
 /** Footer install affordance for desktop browsers. Downward-arrow glyph. */
 function DownloadOnDesktop() {
   return (
@@ -132,6 +165,7 @@ function DownloadOnDesktop() {
       href={DOWNLOAD_URL}
       target="_blank"
       rel="noopener noreferrer"
+      onClick={handleDesktopExternalClick}
       className="group flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-1 text-foreground transition-colors hover:border-accent/70"
     >
       <svg
@@ -429,8 +463,13 @@ function MetricStat({
 }
 
 const WARP_INFO =
-  "Engaging the warp drive bypasses language-validation routines to reduce " +
-  "end-to-end latency, at the cost of verified accuracy.";
+  "LLMs are notoriously unreliable constructed languages like Klingon. Klingon " +
+  "also uses insane agglutinative morphology and polypersonal verb agreement " +
+  "that bury entire grammatical relations inside single affixes. Kluely counters " +
+  "this by routing every answer through six deterministic routines plus multiple " +
+  "validation loops, which together add significant latency. Engaging the warp " +
+  "drive bypasses these language-validation routines to cut end-to-end latency, " +
+  "at the cost of verified accuracy (most of the accuracy).";
 
 /**
  * Star-Trek-flavored switch that trades morphology validation and fidelity
@@ -1028,6 +1067,7 @@ export default function Home() {
           href={DONATION_URL}
           target="_blank"
           rel="noopener noreferrer"
+          onClick={handleDesktopExternalClick}
           aria-describedby="donation-note"
           className="flex items-center gap-1 text-muted transition-colors hover:text-accent focus-visible:text-accent"
         >
@@ -1344,6 +1384,7 @@ export default function Home() {
               href={DONATION_URL}
               target="_blank"
               rel="noopener noreferrer"
+              onClick={handleDesktopExternalClick}
               className="group flex items-center gap-1 text-muted transition-colors hover:text-accent focus-visible:text-accent sm:hidden"
             >
               Help Keep Cloaking Active!
@@ -1358,6 +1399,7 @@ export default function Home() {
               href="https://www.assemblyai.com"
               target="_blank"
               rel="noopener noreferrer"
+              onClick={handleDesktopExternalClick}
               className="text-muted transition-colors hover:text-foreground"
             >
               Powered by AssemblyAI
