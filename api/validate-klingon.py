@@ -102,9 +102,12 @@ def _analyze_word(word):
 
 def analyze_text(text):
     words = []
-    for token in yajwiz.tokenize(text):
-        if token.token_type == "WORD":
-            words.append(_analyze_word(token.text))
+    # yajwiz.tokenize() returns a list of (token_type, text) TUPLES, not objects
+    # with .token_type/.text attributes. Unpack them directly — attribute access
+    # here was raising AttributeError, which surfaced as "Failed to analyze text".
+    for token_type, token_text in yajwiz.tokenize(text):
+        if token_type == "WORD":
+            words.append(_analyze_word(token_text))
             if len(words) >= MAX_WORDS:
                 break
     return {
