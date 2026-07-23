@@ -1,3 +1,11 @@
 # Python dependencies for the Vercel Python serverless functions in api/*.py.
-# yajwiz pulls in appdirs + requests transitively.
+#
+# yajwiz's own metadata only declares appdirs + requests, so pip installs those
+# transitively. But its code ALSO imports `regex` (the PyPI package, distinct
+# from the stdlib `re`) without declaring it — so without the explicit line
+# below, the function builds but crashes at runtime with
+# "ModuleNotFoundError: No module named 'regex'". We audited every import in
+# yajwiz 0.10.4 (and validate-klingon.py): the only third-party modules are
+# appdirs, requests, and regex — everything else is the standard library.
 yajwiz==0.10.4
+regex
