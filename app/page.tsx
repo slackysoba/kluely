@@ -428,6 +428,64 @@ function MetricStat({
   );
 }
 
+const WARP_INFO =
+  "Engaging the warp drive bypasses language-validation routines to reduce " +
+  "end-to-end latency, at the cost of verified accuracy.";
+
+/**
+ * Star-Trek-flavored switch that trades morphology validation and fidelity
+ * retries for lower latency. Engaged state glows accent-red. The "i" icon
+ * reuses the accessible hover/tap tooltip; the switch itself is keyboard-
+ * reachable with an aria-label and role="switch".
+ */
+function WarpToggle({
+  engaged,
+  onToggle,
+}: {
+  engaged: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="flex w-full flex-col items-center gap-1.5">
+      <span className="flex items-center gap-1 text-[10px] uppercase tracking-[0.12em] text-faint">
+        Warp Drive
+        <MetricInfo label="Warp drive — what it does" description={WARP_INFO} />
+      </span>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={engaged}
+        aria-label={
+          engaged
+            ? "Warp drive engaged — language validation is bypassed for lower latency. Activate to disengage."
+            : "Engage warp drive to bypass language validation for lower latency."
+        }
+        onClick={onToggle}
+        className={`flex w-full items-center justify-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] transition-all duration-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent ${
+          engaged
+            ? "border-accent bg-accent text-background shadow-[0_0_14px_rgba(214,50,60,0.55)]"
+            : "border-line bg-surface text-muted hover:border-accent/60 hover:text-foreground"
+        }`}
+      >
+        <svg
+          aria-hidden="true"
+          viewBox="0 0 16 16"
+          className="h-3 w-3 shrink-0"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        >
+          <path d="M3.5 4 7 8l-3.5 4" />
+          <path d="M8.5 4 12 8l-3.5 4" />
+        </svg>
+        {engaged ? "Engaged" : "Engage"}
+      </button>
+    </div>
+  );
+}
+
 /**
  * Understated morphology-confidence marker shown beside the Klingon answer.
  * While verification is in flight it shows a quiet "checking" state, then
@@ -639,6 +697,13 @@ export default function Home() {
   const [answerLoading, setAnswerLoading] = useState(false);
   const [answerError, setAnswerError] = useState<AnswerError | null>(null);
   const [confidence, setConfidence] = useState<Confidence | null>(null);
+  // Warp drive bypasses the expensive validation/retry steps. Mirrored into a
+  // ref so requestAnswer can read the latest value without being recreated.
+  const [warp, setWarp] = useState(false);
+  const warpRef = useRef(false);
+  useEffect(() => {
+    warpRef.current = warp;
+  }, [warp]);
   const [history, setHistory] = useState<HistoryEntry[]>([]);
 
   // Mirror the live exchange into refs so archiving reads the latest values
@@ -773,11 +838,12 @@ export default function Home() {
       setAnswerLoading(true);
       setAnswerError(null);
 
+      const warpEngaged = warpRef.current;
       try {
         const res = await fetch("/api/answer", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ question }),
+          body: JSON.stringify({ question, warp: warpEngaged }),
           signal: controller.signal,
         });
         // A newer final may have superseded this request while we awaited.
@@ -795,9 +861,14 @@ export default function Home() {
           setAnswerError({ kind: "api", question });
           setAnswer(null);
         } else {
-          // Show the Klingon immediately, then verify it asynchronously.
           setAnswer(data);
-          void verifyAnswer(data.klingon, data.english);
+          if (warpEngaged) {
+            // Warp skipped validation entirely — it's honestly unverified.
+            setConfidence("low");
+          } else {
+            // Show the Klingon immediately, then verify it asynchronously.
+            void verifyAnswer(data.klingon, data.english);
+          }
         }
         setAnswerLoading(false);
       } catch (err) {
@@ -1072,6 +1143,12 @@ export default function Home() {
 
                   <div className="flex w-full flex-col items-center gap-4 border-t border-line/70 pt-4">
                     <RailStat label="Timer" value={formatElapsed(elapsedMs)} />
+                    <div className="w-full border-t border-line/70 pt-4">
+                      <WarpToggle
+                        engaged={warp}
+                        onToggle={() => setWarp((prev) => !prev)}
+                      />
+                    </div>
                     <div className="flex w-full flex-col items-center gap-4 border-t border-line/70 pt-4">
                       <MetricStat
                         name="End-to-end"

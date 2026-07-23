@@ -6,6 +6,8 @@
 // critical path (see app/api/verify): the Klingon shows immediately, and the
 // confidence marker resolves a moment later.
 
+import { isKlingonWord } from "@/lib/klingon-orthography";
+
 const VALIDATOR_PATH = "/api/validate-klingon";
 const VALIDATOR_TIMEOUT_MS = 7_000;
 // Below this share of the Klingon's validated meaning mapping back to the
@@ -31,25 +33,18 @@ interface ValidationResult {
   words: ValidationWord[];
 }
 
-// The full Klingon letter set (case-sensitive), digraphs first so they win.
-const KLINGON_LETTER = /(tlh|ch|gh|ng|[bDHjlmnpqQrStvwy']|[aeIou])/g;
-
-/** True when a token is spelled entirely with Klingon letters. */
-function isKlingonOrthography(word: string): boolean {
-  return word.length > 0 && word.replace(KLINGON_LETTER, "").length === 0;
-}
-
 /**
  * A word is acceptable if the analyzer validated it, OR it's a plausible
  * loanword: unknown to the analyzer (no parse) yet properly transliterated
  * into Klingon letters. A word that parses but is flagged ungrammatical is a
- * genuine morphology error and is NOT accepted.
+ * genuine morphology error, and raw English (non-Klingon orthography) is not
+ * accepted.
  */
 function acceptableWord(w: ValidationWord): boolean {
   if (w.valid) {
     return true;
   }
-  return w.parses === false && isKlingonOrthography(w.word);
+  return w.parses === false && isKlingonWord(w.word);
 }
 
 /** Calls the Python validator. Best-effort: returns null on any failure. */

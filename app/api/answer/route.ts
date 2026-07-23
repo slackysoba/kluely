@@ -19,6 +19,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { NextResponse } from "next/server";
 import { KLINGON_GRAMMAR_PRIMER } from "@/lib/klingon-grammar";
+import { nonKlingonTokens } from "@/lib/klingon-orthography";
 import { toPiqad } from "@/lib/piqad";
 import {
   KeyedSlidingWindow,
@@ -39,7 +40,10 @@ const MAX_QUESTION_LENGTH = 2_000;
 // Grounding knobs: cap how many verified roots each concept contributes and how
 // many reach the prompt overall, so the vocabulary list stays tight.
 const MAX_SENSES_PER_CONCEPT = 4;
-const MAX_VOCABULARY = 50;
+const MAX_VOCABULARY = 64;
+// Klingon generation attempts: the first pass plus retries when the output
+// still contains raw-English / non-Klingon tokens.
+const MAX_KLINGON_ATTEMPTS = 3;
 
 // Demo abuse protection. The global cap stays under the Gemini free tier's
 // 15 RPM. Note each request now makes up to two grounded calls (plus a
@@ -175,17 +179,20 @@ The user message gives you:
   - VERIFIED VOCABULARY: canonical Klingon roots (from the boQwI' dictionary) with their exact glosses. Prefer these content roots.
   - SIMPLIFIED PROPOSITIONS: short, concrete, literal statements already decomposed for you. Translate THESE faithfully — do not re-abstract them or add flourish.
 
+ABSOLUTE RULE — the "klingon" field must contain ONLY Klingon words. A raw English word (e.g. "clever", "project", "salmon") must NEVER appear. Every token must be spelled with Klingon letters. If you can't find or build a Klingon word, you STILL may not leave English — substitute the nearest available meaning instead.
+
 Hard rules:
-1. Content roots (nouns, verbs, adjectival verbs, adverbs): PREFER roots from the VERIFIED VOCABULARY list; do not pull other roots from the primer examples or your own memory. When a proposition needs a concrete word that is NOT in the list, in this priority order:
-   a. SUBSTITUTE first: express it with the closest available verified word — a broader category, or a short description built from available words (e.g. if "fish" is absent, use "animal" or "food"; render "sour fruit" as "food" plus a quality). Keep it as specific as the vocabulary allows.
-   b. LOANWORD only if necessary: if no reasonable substitute exists and dropping the word would lose the point of the answer, transliterate the English word into Klingon spelling using ONLY Klingon letters (consonants: b ch D gh H j l m n ng p q Q r S t tlh v w y ' ; vowels: a e I o u). Use loanwords sparingly — they are a last resort.
-   c. NEVER silently drop a concrete noun that carries the answer. Substitute or, failing that, loanword.
+1. Content roots (nouns, verbs, adjectival verbs, adverbs): PREFER roots from the VERIFIED VOCABULARY list; do not pull other roots from the primer examples or your own memory. When a proposition needs a concrete word that is NOT already in the list, in this strict priority order:
+   a. SUBSTITUTE first (almost always the answer): express the MEANING with the closest available verified word — a synonym, a broader category, or a short description built from available words. A word is only "untranslatable" if NO available word approximates its meaning. (Example: "clever" → use "val" = be clever/smart; "fish" → if absent, "animal" or "food"; "sour fruit" → "food" plus a quality.)
+   b. LOANWORD — true last resort, ONLY after substitution genuinely fails: transliterate the English word PHONETICALLY into Klingon, using ONLY Klingon letters (consonants: b ch D gh H j l m n ng p q Q r S t tlh v w y ' ; vowels: a e I o u). A loanword is a Klingon-spelled approximation of the sound — it is NEVER the English word left in place. Use loanwords very sparingly.
+   c. NEVER silently drop a concrete noun that carries the answer, and NEVER leave an English word. Substitute, or as a last resort, transliterate.
 2. You MAY freely use the grammatical apparatus described in the primer: verb prefixes, verb suffixes, noun suffixes, the pronouns (jIH, SoH, ghaH, 'oH, maH, tlhIH, chaH), conjunctions ('ej, 'ach, vaj, pagh, qoj, 'e'), numbers, and the fixed set phrases (Qapla', majQa', nuqneH, lu'/luq).
 3. Apply correct Klingon morphology (attach prefixes and suffixes per the primer) and strict OVS (Object–Verb–Subject) word order.
 4. Translate every proposition — keep the concrete content. Keep it tight; a faithful literal rendering beats a padded one.
+5. If the user message includes a CORRECTION section, it names the exact Klingon words to use in place of English words you previously left untranslated. You MUST use those words (they are approved) and remove every English token.
 
 Return strict JSON with exactly two fields:
-  - "klingon": the rendering in Latin transcription, correct capitalization, OVS order.
+  - "klingon": the rendering in Latin transcription, correct capitalization, OVS order. Every token must be a Klingon word.
   - "backTranslation": a literal, structure-revealing English back-translation (deliberately awkward, revealing the Klingon structure). Preserve any loanword as-is and, in brackets, note what it stands for.
 Do NOT produce pIqaD; it is derived mechanically downstream.`;
 
@@ -346,6 +353,31 @@ function lookupKeys(concept: string): string[] {
   return [...keys];
 }
 
+/**
+ * Semantic best match: canonical lexicon entries whose gloss expresses the
+ * meaning of an English word. Matching is by gloss term (the englishToKlingon
+ * index is keyed on individual gloss words), with morphological + "be X"
+ * fallbacks — so "clever"/"smart"/"intelligent" all resolve to val. Returns up
+ * to `limit` distinct senses, canon-first.
+ */
+function lexiconMatches(word: string, limit: number): LexiconSense[] {
+  const seen = new Set<string>();
+  const out: LexiconSense[] = [];
+  for (const key of lookupKeys(word)) {
+    const senses = lexicon.englishToKlingon[key];
+    if (!senses) continue;
+    for (const sense of senses) {
+      if (!sense.canon) continue;
+      const id = `${sense.klingon}|${sense.pos}|${sense.homophone ?? ""}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      out.push(sense);
+      if (out.length >= limit) return out;
+    }
+  }
+  return out;
+}
+
 /** Step 3: resolve concepts to verified, canonical Klingon roots. */
 function verifiedVocabulary(concepts: string[]): LexiconSense[] {
   const seen = new Set<string>();
@@ -353,25 +385,55 @@ function verifiedVocabulary(concepts: string[]): LexiconSense[] {
 
   for (const concept of concepts) {
     if (result.length >= MAX_VOCABULARY) break;
-    let taken = 0;
-    for (const key of lookupKeys(concept)) {
-      const senses = lexicon.englishToKlingon[key];
-      if (!senses) continue;
-      for (const sense of senses) {
-        if (!sense.canon) continue; // verified canon roots only
-        const id = `${sense.klingon}|${sense.pos}|${sense.homophone ?? ""}`;
-        if (seen.has(id)) continue;
-        seen.add(id);
-        result.push(sense);
-        if (++taken >= MAX_SENSES_PER_CONCEPT) break;
-        if (result.length >= MAX_VOCABULARY) break;
-      }
-      if (taken >= MAX_SENSES_PER_CONCEPT || result.length >= MAX_VOCABULARY) {
-        break;
-      }
+    for (const sense of lexiconMatches(concept, MAX_SENSES_PER_CONCEPT)) {
+      const id = `${sense.klingon}|${sense.pos}|${sense.homophone ?? ""}`;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      result.push(sense);
+      if (result.length >= MAX_VOCABULARY) break;
     }
   }
   return result;
+}
+
+const TERM_STOPWORDS = new Set([
+  "the", "a", "an", "and", "or", "but", "of", "to", "in", "on", "for", "with",
+  "as", "at", "by", "is", "are", "was", "were", "be", "been", "it", "its",
+  "this", "that", "these", "those", "you", "your", "our", "we", "they", "them",
+  "their", "his", "her", "him", "she", "he", "i", "my", "me", "will", "can",
+  "not", "no", "one", "who", "which", "what", "have", "has", "had", "do",
+  "does", "did", "from", "into", "than", "then", "so", "very", "more", "most",
+]);
+
+/** Concrete content words drawn straight from the propositions, for lookup. */
+function propositionTerms(propositions: string[]): string[] {
+  const terms: string[] = [];
+  const seen = new Set<string>();
+  for (const proposition of propositions) {
+    for (const raw of proposition.toLowerCase().split(/[^a-z']+/)) {
+      const term = raw.replace(/^'+|'+$/g, "").trim();
+      if (term.length > 2 && !TERM_STOPWORDS.has(term) && !seen.has(term)) {
+        seen.add(term);
+        terms.push(term);
+      }
+    }
+  }
+  return terms;
+}
+
+/** Retry instructions naming the correct Klingon word for each leaked token. */
+function buildCorrection(leaked: string[]): string {
+  const lines = leaked.map((token) => {
+    const matches = lexiconMatches(token.toLowerCase(), 2);
+    if (matches.length > 0) {
+      const options = matches
+        .map((m) => `"${m.klingon}" (${m.gloss})`)
+        .join(" or ");
+      return `- You left the English word "${token}". Use the Klingon word ${options} instead.`;
+    }
+    return `- You left the English word "${token}". There is no dictionary word for it — express its meaning with available vocabulary, or as a last resort transliterate it phonetically into Klingon letters. Do NOT leave the English word.`;
+  });
+  return `CORRECTION — your previous attempt left non-Klingon (English) tokens in the output. Every token must be a Klingon word. Fix these and re-render:\n${lines.join("\n")}`;
 }
 
 /** Human-readable part of speech for the vocabulary list. */
@@ -411,13 +473,15 @@ async function generateKlingon(
   propositions: string[],
   vocab: LexiconSense[],
   apiKey: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  correction = ""
 ): Promise<{ klingon: string; backTranslation: string } | null> {
+  const corrections = correction ? `\n\n${correction}` : "";
   const userText = `VERIFIED VOCABULARY (klingon — gloss [part of speech]) — prefer these content roots:
 ${formatVocabulary(vocab)}
 
 SIMPLIFIED PROPOSITIONS TO RENDER IN KLINGON (translate these literal statements faithfully):
-${propositions.map((p, i) => `${i + 1}. ${p}`).join("\n")}`;
+${propositions.map((p, i) => `${i + 1}. ${p}`).join("\n")}${corrections}`;
 
   const obj = await callGemini(
     SYSTEM_KLINGON,
@@ -445,11 +509,36 @@ ${propositions.map((p, i) => `${i + 1}. ${p}`).join("\n")}`;
 // Grounded flow (generate and return immediately; validation is separate)
 // ---------------------------------------------------------------------------
 
-/** Orchestrates the simplify-then-translate flow into a full payload. */
+/**
+ * pIqaD is never model output: LLMs can't reliably emit PUA codepoints, so it's
+ * transliterated deterministically from the Latin transcription. The displayed
+ * English stays the polished answer, not the propositions.
+ */
+function toAnswerPayload(
+  english: string,
+  kl: { klingon: string; backTranslation: string }
+): AnswerPayload {
+  return {
+    english,
+    klingon: kl.klingon,
+    pIqaD: toPiqad(kl.klingon),
+    backTranslation: kl.backTranslation,
+  };
+}
+
+/**
+ * Orchestrates the simplify-then-translate flow into a full payload.
+ *
+ * `warp` keeps the cheap, high-value prompt steps (grounding, simplify-then-
+ * translate, substitution) but skips the expensive verification: the raw-
+ * English leak scan and its retry loop here, and — decided on the client — the
+ * async yajwiz validation. It returns the first grounded generation directly.
+ */
 async function generateGroundedAnswer(
   question: string,
   apiKey: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  warp: boolean
 ): Promise<AnswerPayload | null> {
   let ec:
     | { english: string; propositions: string[]; concepts: string[] }
@@ -461,28 +550,62 @@ async function generateGroundedAnswer(
     return null;
   }
 
-  // Answer concepts first (they take priority under the cap); seed concepts
-  // backfill so the Klingon step always has verified material to work with.
-  const vocab = verifiedVocabulary([...ec.concepts, ...SEED_CONCEPTS]);
+  // Ground the vocabulary on the actual words in the propositions first (so
+  // every content word being translated has a candidate), then the model's
+  // concept synonyms, then generic seeds — all resolved semantically by gloss.
+  const vocab = verifiedVocabulary([
+    ...propositionTerms(ec.propositions),
+    ...ec.concepts,
+    ...SEED_CONCEPTS,
+  ]);
 
-  // Translate the simplified propositions, not the polished answer.
+  if (warp) {
+    // Warp: skip the leak scan and retry loop; return the first generation
+    // (still allow a re-ask only if the model returns unparseable JSON).
+    let kl: { klingon: string; backTranslation: string } | null = null;
+    for (let attempt = 0; attempt < 2 && !kl; attempt++) {
+      kl = await generateKlingon(ec.propositions, vocab, apiKey, signal);
+    }
+    return kl ? toAnswerPayload(ec.english, kl) : null;
+  }
+
+  // Translate the simplified propositions (not the polished answer). Hard-check
+  // for raw-English leaks with a cheap local orthography scan; on a leak, name
+  // the correct Klingon word for each token and retry.
   let kl: { klingon: string; backTranslation: string } | null = null;
-  for (let attempt = 0; attempt < 2 && !kl; attempt++) {
-    kl = await generateKlingon(ec.propositions, vocab, apiKey, signal);
+  let correction = "";
+  for (let attempt = 0; attempt < MAX_KLINGON_ATTEMPTS; attempt++) {
+    const candidate = await generateKlingon(
+      ec.propositions,
+      vocab,
+      apiKey,
+      signal,
+      correction
+    );
+    if (!candidate) {
+      continue; // Malformed JSON; retry if attempts remain.
+    }
+    kl = candidate; // Best effort so far.
+    const leaked = nonKlingonTokens(candidate.klingon);
+    if (leaked.length === 0) {
+      break; // Every token is Klingon — done.
+    }
+    // Make the correct words available and instruct the model to use them.
+    for (const token of leaked) {
+      for (const match of lexiconMatches(token.toLowerCase(), 2)) {
+        if (
+          !vocab.some((s) => s.klingon === match.klingon && s.pos === match.pos)
+        ) {
+          vocab.push(match);
+        }
+      }
+    }
+    correction = buildCorrection(leaked);
   }
   if (!kl) {
     return null;
   }
-
-  // pIqaD is never model output: LLMs can't reliably emit PUA codepoints, so
-  // it's transliterated deterministically from the Latin transcription. The
-  // displayed English stays the polished answer, not the propositions.
-  return {
-    english: ec.english,
-    klingon: kl.klingon,
-    pIqaD: toPiqad(kl.klingon),
-    backTranslation: kl.backTranslation,
-  };
+  return toAnswerPayload(ec.english, kl);
 }
 
 /** Fallback: the previous single-call generation, for graceful degradation. */
@@ -531,8 +654,12 @@ export async function POST(request: Request) {
   }
 
   let question: string;
+  let warp = false;
   try {
-    const body = (await request.json()) as { question?: unknown };
+    const body = (await request.json()) as {
+      question?: unknown;
+      warp?: unknown;
+    };
     if (
       typeof body.question !== "string" ||
       body.question.trim().length === 0 ||
@@ -541,9 +668,10 @@ export async function POST(request: Request) {
       throw new Error("invalid");
     }
     question = body.question.trim();
+    warp = body.warp === true;
   } catch {
     return NextResponse.json(
-      { error: "Request body must be JSON: { question: string }" },
+      { error: "Request body must be JSON: { question: string, warp?: boolean }" },
       { status: 400 }
     );
   }
@@ -560,8 +688,13 @@ export async function POST(request: Request) {
   const signal = AbortSignal.timeout(TIMEOUT_MS);
   try {
     // Primary: grounded, lexicon-backed generation. Returns immediately; the
-    // client verifies morphology separately via /api/verify.
-    const grounded = await generateGroundedAnswer(question, apiKey, signal);
+    // client verifies morphology separately via /api/verify (skipped under warp).
+    const grounded = await generateGroundedAnswer(
+      question,
+      apiKey,
+      signal,
+      warp
+    );
     if (grounded) {
       return NextResponse.json(grounded);
     }
