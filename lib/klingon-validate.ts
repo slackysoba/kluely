@@ -10,6 +10,22 @@ import { isKlingonWord } from "@/lib/klingon-orthography";
 
 const VALIDATOR_PATH = "/api/validate-klingon";
 const VALIDATOR_TIMEOUT_MS = 7_000;
+
+/**
+ * Where the yajwiz validator lives. By default it's a same-origin Python
+ * serverless function (api/validate-klingon.py). But Vercel doesn't reliably
+ * route a standalone Python function bundled inside a Next.js project, so
+ * KLINGON_VALIDATOR_URL lets you point at the validator deployed as its OWN
+ * Vercel project (zero-config Python, which deploys reliably). Set it to that
+ * project's full endpoint, e.g. https://kluely-validator.vercel.app/api/validate-klingon.
+ * Unset → same-origin, i.e. exactly the previous behaviour.
+ */
+function validatorEndpoint(origin: string): URL {
+  const override = process.env.KLINGON_VALIDATOR_URL;
+  return override && override.length > 0
+    ? new URL(override)
+    : new URL(VALIDATOR_PATH, origin);
+}
 // Below this share of the Klingon's validated meaning mapping back to the
 // intended English, the rendering is treated as having drifted.
 const MEANING_ALIGNMENT_MIN = 0.25;
@@ -64,7 +80,7 @@ export async function validateKlingon(
   signal: AbortSignal
 ): Promise<ValidationResult | null> {
   try {
-    const res = await fetch(new URL(VALIDATOR_PATH, origin), {
+    const res = await fetch(validatorEndpoint(origin), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text: klingon }),
