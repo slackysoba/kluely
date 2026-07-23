@@ -229,9 +229,10 @@ STRUCTURE RULES — these are checked mechanically and WILL be rejected:
 - PLURAL SUFFIX BY NOUN CLASS: -pu' only for beings that can use language, -Du' only for body parts, -mey for everything else. A body part like "arm" (DeS) takes -Du' → "DeSDu'", never -pu'.
 - POSSESSIVE PERSON/NUMBER: match the possessor. their = -chaj, our = -maj, your(sg) = -lIj, your(pl) = -raj, his/her/its = -Daj, my = -wIj. Do not use -Daj (his/her) when the meaning is "their" (-chaj).
 
-Return strict JSON with exactly one field:
+Return strict JSON with these fields:
   - "klingon": the rendering in Latin transcription, correct capitalization, OVS order, with SPACES between words. Every token must be a valid, dictionary-attested Klingon word.
-Do NOT produce pIqaD or a back-translation; both are derived mechanically downstream (pIqaD from the transcription, the literal back-translation from a morphological parse).`;
+  - "backTranslation": a short, LITERAL word-by-word English gloss of the Klingon you just wrote, kept in Klingon (OVS) order and preserving its structure — e.g. "problem difficult I-solved. team-my I-lead". Gloss the Klingon you actually produced, not the original English. This is a readable literal for the user.
+Do NOT produce pIqaD; it is derived mechanically downstream from the transcription.`;
 
 const SCHEMA_KLINGON = {
   type: "OBJECT",
@@ -241,32 +242,38 @@ const SCHEMA_KLINGON = {
       description:
         "The answer in Klingon, Latin transcription, correct capitalization, OVS order, built only from the supplied vocabulary.",
     },
+    backTranslation: {
+      type: "STRING",
+      description:
+        "A short, literal word-by-word English gloss of the klingon, kept in Klingon (OVS) order.",
+    },
   },
-  required: ["klingon"],
-  propertyOrdering: ["klingon"],
+  required: ["klingon", "backTranslation"],
+  propertyOrdering: ["klingon", "backTranslation"],
 } as const;
 
-// Direct single-call path: one fast Gemini call producing the answer, its
-// Klingon, and an LLM back-translation together — the app's original ~single-
-// round-trip latency. Used for WARP mode, and as the fallback when grounded
-// generation fails.
-const SYSTEM_DIRECT = `You are an elite interview coach. The user gives you an interview question. Write the strongest possible answer for a candidate to give: specific, confident, and structured — no filler, no "great question", no hedging. Two to three sentences.
+// Warp single-call path: the absolute minimum — ONE fast Gemini call that emits
+// just the English answer and its Klingon, and nothing else. No simplification,
+// no lexicon grounding, no validation, and deliberately NO back-translation: the
+// literal is an extra output the model would have to generate, so dropping it
+// both matches warp's "no back-translation" contract and shaves output latency.
+// Also the fallback when grounded generation fails entirely.
+const SYSTEM_WARP = `You are an elite interview coach. The user gives you an interview question. Write the strongest possible answer for a candidate to give: specific, confident, and structured — no filler, no "great question", no hedging. Two to three sentences.
 
-Then render that answer in Klingon according to the primer below.
+Then render that answer in Klingon according to the primer below. Speed matters most here: produce it directly, in one pass.
 
-One override to the primer's output requirements: do NOT produce the pIqaD field. Return only english, klingon, and backTranslation. The pIqaD transliteration is derived mechanically from your Latin transcription.
+One override to the primer's output requirements: return ONLY english and klingon — do NOT produce the pIqaD field or any back-translation. The pIqaD transliteration is derived mechanically from your Latin transcription.
 
 ${KLINGON_GRAMMAR_PRIMER}`;
 
-const SCHEMA_DIRECT = {
+const SCHEMA_WARP = {
   type: "OBJECT",
   properties: {
     english: { type: "STRING" },
     klingon: { type: "STRING" },
-    backTranslation: { type: "STRING" },
   },
-  required: ["english", "klingon", "backTranslation"],
-  propertyOrdering: ["english", "klingon", "backTranslation"],
+  required: ["english", "klingon"],
+  propertyOrdering: ["english", "klingon"],
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -647,7 +654,7 @@ async function generateKlingon(
   apiKey: string,
   signal: AbortSignal,
   correction = ""
-): Promise<{ klingon: string } | null> {
+): Promise<{ klingon: string; backTranslation?: string } | null> {
   const corrections = correction ? `\n\n${correction}` : "";
   const userText = `VERIFIED VOCABULARY (klingon — gloss [part of speech]) — prefer these content roots:
 ${formatVocabulary(vocab)}
@@ -665,9 +672,15 @@ ${propositions.map((p, i) => `${i + 1}. ${p}`).join("\n")}${corrections}`;
   if (!obj) {
     return null;
   }
-  const { klingon } = obj;
+  const { klingon, backTranslation } = obj;
   if (typeof klingon === "string" && klingon.length > 0) {
-    return { klingon };
+    return {
+      klingon,
+      backTranslation:
+        typeof backTranslation === "string" && backTranslation.length > 0
+          ? backTranslation
+          : undefined,
+    };
   }
   return null;
 }
@@ -730,6 +743,7 @@ async function generateGroundedAnswer(
     klingon: string;
     problems: number;
     validation: ValidationResult | null;
+    backTranslation?: string;
   } | null = null;
   let correction = "";
   let validationMs = 0;
@@ -766,7 +780,12 @@ async function generateGroundedAnswer(
     }
 
     if (!best || lines.length < best.problems) {
-      best = { klingon: candidate.klingon, problems: lines.length, validation };
+      best = {
+        klingon: candidate.klingon,
+        problems: lines.length,
+        validation,
+        backTranslation: candidate.backTranslation,
+      };
     }
 
     // Passed the gate — but "high" requires the validator to have actually run.
@@ -774,7 +793,9 @@ async function generateGroundedAnswer(
       if (validation) {
         return toAnswerPayload(ec.english, candidate.klingon, {
           confidence: "high",
-          backTranslation: backTranslate(validation),
+          // Prefer the parse-derived literal (accurate, structure-revealing);
+          // fall back to the model's own gloss if the parse yielded nothing.
+          backTranslation: backTranslate(validation) || candidate.backTranslation,
           validationMs: Math.round(validationMs),
         });
       }
@@ -800,55 +821,47 @@ async function generateGroundedAnswer(
     return null;
   }
   // Exhausted attempts (or unvalidated): best effort, flagged low confidence.
+  // Still carry a literal — the parse-derived one when the validator ran, else
+  // the model's own gloss — so normal mode always shows a back-translation.
   return toAnswerPayload(ec.english, best.klingon, {
     confidence: "low",
-    backTranslation: best.validation
-      ? backTranslate(best.validation)
-      : undefined,
+    backTranslation:
+      (best.validation ? backTranslate(best.validation) : "") ||
+      best.backTranslation,
     validationMs: validatorSeen ? Math.round(validationMs) : undefined,
   });
 }
 
 /**
- * Direct single-call generation — the app's original fast path: the English
- * answer, its Klingon, and an LLM back-translation in one Gemini call. Warp
- * mode's primary path, and the fallback when grounded generation fails.
+ * Warp single-call generation — the fastest path: the English answer and its
+ * Klingon in ONE Gemini call, and nothing else. No back-translation is
+ * requested (that's the whole point of warp), so the "Literal:" line does not
+ * appear under warp. Also the fallback when grounded generation fails entirely.
  */
-async function generateDirectAnswer(
+async function generateWarpAnswer(
   question: string,
   apiKey: string,
   signal: AbortSignal
 ): Promise<AnswerPayload | null> {
   const obj = await callGemini(
-    SYSTEM_DIRECT,
+    SYSTEM_WARP,
     question,
-    SCHEMA_DIRECT,
+    SCHEMA_WARP,
     apiKey,
     signal
   );
   if (!obj) {
     return null;
   }
-  const { english, klingon, backTranslation } = obj;
+  const { english, klingon } = obj;
   if (
     typeof english === "string" &&
     english.length > 0 &&
     typeof klingon === "string" &&
     klingon.length > 0
   ) {
-    const payload: AnswerPayload = {
-      english,
-      klingon,
-      pIqaD: toPiqad(klingon),
-    };
-    // The literal is a cheap by-product of the SAME call, so keep it when the
-    // model returns it (this is what shows the "Literal:" line under warp). But
-    // never reject the answer — or fall through to a second, slower call — just
-    // because the literal is missing: the Klingon is what warp is here to emit.
-    if (typeof backTranslation === "string" && backTranslation.length > 0) {
-      payload.backTranslation = backTranslation;
-    }
-    return payload;
+    // No backTranslation by design — warp goes straight to Klingon.
+    return { english, klingon, pIqaD: toPiqad(klingon) };
   }
   return null;
 }
@@ -904,13 +917,13 @@ export async function POST(request: Request) {
   try {
     if (warp) {
       // Warp is the absolute-minimum path: ONE ungrounded Gemini call that
-      // takes the question straight to English + Klingon (plus a free literal),
-      // with no simplification, lexicon grounding, validation, or retry loop —
-      // nothing between the answer and the screen. It deliberately does NOT
-      // fall through to the grounded pipeline: warp's whole point is speed, so
-      // if the single call fails we return an error and let the user retry
-      // rather than quietly running the slow path they turned off.
-      const answer = await generateDirectAnswer(question, apiKey, signal);
+      // takes the question straight to English + Klingon — no simplification,
+      // lexicon grounding, validation, retry loop, OR back-translation. Nothing
+      // between the answer and the screen. It deliberately does NOT fall through
+      // to the grounded pipeline: warp's whole point is speed, so if the single
+      // call fails we return an error and let the user retry rather than quietly
+      // running the slow path they turned off.
+      const answer = await generateWarpAnswer(question, apiKey, signal);
       if (answer) {
         return NextResponse.json(answer);
       }
@@ -931,8 +944,9 @@ export async function POST(request: Request) {
     if (primary) {
       return NextResponse.json(primary);
     }
-    // Degrade rather than fail: fall back to the single-call generation.
-    const fallback = await generateDirectAnswer(question, apiKey, signal);
+    // Degrade rather than fail: fall back to the single-call warp generation
+    // (English + Klingon, no literal) so the user still gets an answer.
+    const fallback = await generateWarpAnswer(question, apiKey, signal);
     if (fallback) {
       return NextResponse.json(fallback);
     }
