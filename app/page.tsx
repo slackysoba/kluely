@@ -19,6 +19,7 @@ import {
   SessionCapacityError,
 } from "@/lib/assemblyai-stream";
 import Image from "next/image";
+import Link from "next/link";
 import Wordmark from "@/components/Wordmark";
 // EXPERIMENTAL warp-speed backdrop. Remove this import + the <WarpBackground />
 // below (and components/WarpBackground.tsx) to take it out.
@@ -156,6 +157,37 @@ function handleDesktopExternalClick(
   }
   event.preventDefault();
   window.open(event.currentTarget.href, "_blank", "noopener,noreferrer");
+}
+
+/**
+ * Header link to the explainer page. The caller supplies the display utility
+ * (`sm:inline-flex` for the desktop header, `inline-flex sm:hidden` for the
+ * mobile footer) so the same link can follow the donation link's pattern:
+ * pinned in the header on desktop, tucked into the footer on mobile.
+ */
+function HowItWorksLink({ className = "" }: { className?: string }) {
+  return (
+    <Link
+      href="/how-it-works"
+      className={`items-center gap-1.5 text-xs text-muted transition-colors hover:text-accent focus-visible:text-accent ${className}`}
+    >
+      <svg
+        aria-hidden="true"
+        viewBox="0 0 16 16"
+        className="h-3.5 w-3.5"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      >
+        <circle cx="8" cy="8" r="6.25" />
+        <path d="M8 11.4v-3.4" />
+        <path d="M8 5.4h.01" />
+      </svg>
+      How Kluely Works
+    </Link>
+  );
 }
 
 /** Footer install affordance for desktop browsers. Downward-arrow glyph. */
@@ -1059,6 +1091,12 @@ export default function Home() {
   return (
     <div className="relative flex min-h-screen flex-col">
       <WarpBackground />
+      {/* Explainer link, pinned top-left on the idle screen (desktop only,
+          like the donation link opposite it). On mobile it moves to the footer
+          instead — see below. The recording layout carries its own header copy. */}
+      {!active && (
+        <HowItWorksLink className="absolute left-6 top-6 z-10 hidden sm:inline-flex sm:left-8 sm:top-7" />
+      )}
       {/* Donation aside, top right (desktop only). On mobile this absolute
           link floats over the header, so it's hidden here and shown in the
           footer instead — see below. */}
@@ -1095,18 +1133,24 @@ export default function Home() {
             <div className="mx-auto w-full max-w-[1040px] xl:max-w-[1180px]">
               <motion.div
                 {...fade}
-                className="mb-8 flex items-center gap-2.5"
-                aria-label="Kluely"
+                className="mb-8 flex items-center gap-4"
               >
-                <Image
-                  src="/logo.png"
-                  alt=""
-                  width={120}
-                  height={160}
-                  loading="eager"
-                  className="h-6 w-auto"
+                <HowItWorksLink className="hidden sm:inline-flex" />
+                <span
+                  aria-hidden="true"
+                  className="hidden h-4 w-px bg-line sm:block"
                 />
-                <Wordmark className="h-5 w-auto" />
+                <div className="flex items-center gap-2.5" aria-label="Kluely">
+                  <Image
+                    src="/logo.png"
+                    alt=""
+                    width={120}
+                    height={160}
+                    loading="eager"
+                    className="h-6 w-auto"
+                  />
+                  <Wordmark className="h-5 w-auto" />
+                </div>
               </motion.div>
 
               <div className="flex gap-6 md:gap-8">
@@ -1140,7 +1184,16 @@ export default function Home() {
                     <div className="w-full border-t border-line/70 pt-4">
                       <WarpToggle
                         engaged={warp}
-                        onToggle={() => setWarp((prev) => !prev)}
+                        onToggle={() => {
+                          // Engaging warp skips validation entirely, so the
+                          // metric has nothing to report — reset it to "—"
+                          // rather than leave the last median frozen on screen.
+                          if (!warp) {
+                            validationSamplesRef.current = [];
+                            setValidationMs(null);
+                          }
+                          setWarp((prev) => !prev);
+                        }}
                       />
                     </div>
                     <div className="flex w-full flex-col items-center gap-4 border-t border-line/70 pt-4">
@@ -1280,7 +1333,7 @@ export default function Home() {
                 </div>
                 <p className="text-xs text-faint lg:text-sm">
                   {mode === "practice"
-                    ? "Uses your microphone — answering what you say."
+                    ? "Uses your own microphone as input"
                     : "Captures a browser tab — answering what they ask."}
                 </p>
               </header>
@@ -1395,6 +1448,10 @@ export default function Home() {
                 →
               </span>
             </a>
+            {/* Mobile-only explainer link: sits between the donation and credit
+                links. The desktop copy lives top-left in the header, so this is
+                hidden from sm up. */}
+            <HowItWorksLink className="inline-flex sm:hidden" />
             <a
               href="https://www.assemblyai.com"
               target="_blank"
