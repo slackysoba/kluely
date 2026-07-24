@@ -104,7 +104,7 @@ export default function HowItWorksPage() {
         On end of turn, the client sends the finalized transcript to
         Kluely&apos;s own server, which passes it to Google Gemini. AssemblyAI
         and Gemini do not communicate directly; the app routes the transcript
-        between them. The Gemini key also stays server-side.
+        between them.
       </p>
 
       <SectionHeading>Translation and validation pipeline</SectionHeading>
