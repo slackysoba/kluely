@@ -495,10 +495,10 @@ function MetricStat({
 }
 
 const WARP_INFO =
-  "LLMs are notoriously unreliable constructed languages like Klingon. Klingon " +
+  "LLMs are notoriously unreliable with constructed languages like Klingon. Klingon " +
   "also uses insane agglutinative morphology and polypersonal verb agreement " +
   "that bury entire grammatical relations inside single affixes. Kluely counters " +
-  "this by routing every answer through six deterministic routines plus multiple " +
+  "this by routing every answer through eight deterministic routines plus multiple " +
   "validation loops, which together add significant latency. Engaging the warp " +
   "drive bypasses these language-validation routines to cut end-to-end latency, " +
   "at the cost of verified accuracy (most of the accuracy).";
