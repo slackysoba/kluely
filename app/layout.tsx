@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Space_Grotesk, Space_Mono } from "next/font/google";
 import localFont from "next/font/local";
+import { Analytics } from "@vercel/analytics/next";
 import "./globals.css";
 
 // Trial font swap (Geist → Space Grotesk/Mono). The CSS variable names are
@@ -69,7 +70,10 @@ export default function RootLayout({
       lang="en"
       className={`${uiSans.variable} ${uiMono.variable} ${piqad.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col">{children}</body>
+      <body className="min-h-full flex flex-col">
+        {children}
+        <Analytics />
+      </body>
     </html>
   );
 }
