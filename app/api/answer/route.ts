@@ -41,10 +41,19 @@ import {
 const MODEL = "gemini-3.5-flash-lite";
 const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 
-// Overall per-request budget. In the grounded (non-warp) path this now covers
-// generation AND the yajwiz validation + retry loop that GATES the output, so
-// it's higher than the warp path needs.
+// Overall per-request HARD ceiling. The grounded path must never actually reach
+// this — the soft deadline below stops it well short so we return a best-effort
+// answer instead of a bare 504. It exists only as a backstop.
 const TIMEOUT_MS = 25_000;
+// Soft deadline for the grounded pipeline: once this much of the budget is gone,
+// stop starting new generate→validate attempts and return the best rendering so
+// far (or fall back to warp). This is the core protection against the serial
+// retry loop on slow, long-answer generations blowing the whole budget.
+const GROUNDED_SOFT_DEADLINE_MS = 17_000;
+// Per-call cap on any single Gemini generation, so one slow/hung call (we've
+// observed 7s+ tails) can't consume the whole request. An over-budget call is
+// abandoned and treated as a failed attempt, not a hang.
+const GEMINI_CALL_TIMEOUT_MS = 9_000;
 // Warp is a single ungrounded call — no simplification, no lexicon grounding,
 // no validation, no retries. It gets its own tight budget so it never waits on
 // the grounded pipeline's much larger timeout; if the one call can't answer
@@ -56,9 +65,11 @@ const MAX_QUESTION_LENGTH = 2_000;
 // many reach the prompt overall, so the vocabulary list stays tight.
 const MAX_SENSES_PER_CONCEPT = 4;
 const MAX_VOCABULARY = 64;
-// Klingon generation attempts: the first pass plus retries when the output
-// still contains raw-English / non-Klingon tokens.
-const MAX_KLINGON_ATTEMPTS = 3;
+// Klingon generation attempts: the first pass plus a retry when the output still
+// contains raw-English / non-Klingon tokens or fails the morphology gate. Capped
+// low because each attempt is a full (sometimes multi-second) generation, and
+// the soft deadline can cut it shorter still.
+const MAX_KLINGON_ATTEMPTS = 2;
 
 // Demo abuse protection. The global cap stays under the Gemini free tier's
 // 15 RPM. Note each request now makes up to two grounded calls (plus a
@@ -287,50 +298,64 @@ const SCHEMA_WARP = {
 // Gemini
 // ---------------------------------------------------------------------------
 
-/** One structured-output call. Returns the parsed JSON object, or null. */
+/**
+ * One structured-output call. Returns the parsed JSON object, or null on ANY
+ * failure — non-OK status, malformed JSON, a network reject, or a timeout.
+ * Never throws: a failed call is just a null the caller can retry or fall back
+ * on, so one bad upstream call can't take down the whole request. A per-call
+ * timeout bounds the tail so a single slow generation can't eat the budget.
+ */
 async function callGemini(
   systemInstruction: string,
   userText: string,
   responseSchema: object,
   apiKey: string,
-  signal: AbortSignal
+  signal: AbortSignal,
+  perCallTimeoutMs = GEMINI_CALL_TIMEOUT_MS
 ): Promise<Record<string, unknown> | null> {
-  const upstream = await fetch(GEMINI_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "x-goog-api-key": apiKey,
-    },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemInstruction }] },
-      contents: [{ role: "user", parts: [{ text: userText }] }],
-      generationConfig: {
-        responseMimeType: "application/json",
-        responseSchema,
-      },
-    }),
+  // Whichever fires first: the request-wide signal or this call's own cap.
+  const callSignal = AbortSignal.any([
     signal,
-  });
-
-  if (!upstream.ok) {
-    // Log status only — upstream error bodies must never reach the client,
-    // and we don't want key-bearing URLs or headers in logs either.
-    console.error(`Gemini request failed with status ${upstream.status}`);
-    return null;
-  }
-
-  const data = (await upstream.json()) as GeminiResponse;
-  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-  if (typeof text !== "string") {
-    return null;
-  }
+    AbortSignal.timeout(perCallTimeoutMs),
+  ]);
   try {
+    const upstream = await fetch(GEMINI_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": apiKey,
+      },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemInstruction }] },
+        contents: [{ role: "user", parts: [{ text: userText }] }],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema,
+        },
+      }),
+      signal: callSignal,
+    });
+
+    if (!upstream.ok) {
+      // Log status only — upstream error bodies must never reach the client,
+      // and we don't want key-bearing URLs or headers in logs either.
+      console.error(`Gemini request failed with status ${upstream.status}`);
+      return null;
+    }
+
+    const data = (await upstream.json()) as GeminiResponse;
+    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (typeof text !== "string") {
+      return null;
+    }
     const parsed: unknown = JSON.parse(text);
     return typeof parsed === "object" && parsed !== null
       ? (parsed as Record<string, unknown>)
       : null;
   } catch {
-    return null; // Malformed JSON from the model; caller decides whether to retry.
+    // Network reject, abort (per-call cap or request-wide), or malformed JSON.
+    // The caller decides whether to retry or fall back.
+    return null;
   }
 }
 
@@ -731,8 +756,12 @@ function toAnswerPayload(
  * Non-warp path: grounded simplify-then-translate, then GATE the output on the
  * yajwiz morphological parse. Each attempt is validated; if any word fails to
  * parse or violates the structural checks, we retry with a specific correction.
- * The answer is only returned once it passes (high confidence) or attempts are
- * exhausted (best effort, low confidence). Validation is on the critical path.
+ * The answer is returned once it passes (high confidence), attempts are
+ * exhausted, or the soft deadline hits (best effort, low confidence). Validation
+ * is on the critical path, but bounded: a soft time deadline stops new attempts,
+ * a per-call cap bounds each generation, and the validator is circuit-broken
+ * after one failure — so a slow upstream degrades gracefully instead of timing
+ * the whole request out.
  */
 async function generateGroundedAnswer(
   question: string,
@@ -740,11 +769,13 @@ async function generateGroundedAnswer(
   signal: AbortSignal,
   origin: string | null
 ): Promise<AnswerPayload | null> {
+  const deadline = performance.now() + GROUNDED_SOFT_DEADLINE_MS;
   let ec:
     | { english: string; propositions: string[]; concepts: string[] }
     | null = null;
   for (let attempt = 0; attempt < 2 && !ec; attempt++) {
     ec = await generateEnglishAndSimplification(question, apiKey, signal);
+    if (performance.now() > deadline) break; // Don't burn the budget retrying.
   }
   if (!ec) {
     return null;
@@ -773,8 +804,16 @@ async function generateGroundedAnswer(
   let correction = "";
   let validationMs = 0;
   let validatorSeen = false;
+  // Once the validator fails or times out once, stop calling it for the rest of
+  // this request: it's almost certainly down/cold, and three serial 4s waits are
+  // exactly what blows the budget. We degrade to the local raw-English scan.
+  let validatorDown = false;
 
   for (let attempt = 0; attempt < MAX_KLINGON_ATTEMPTS; attempt++) {
+    // Stop starting new attempts once the soft deadline passes — we'd rather
+    // return the best rendering so far than risk the hard timeout with nothing.
+    if (attempt > 0 && performance.now() > deadline) break;
+
     const candidate = await generateKlingon(
       ec.propositions,
       vocab,
@@ -784,19 +823,20 @@ async function generateGroundedAnswer(
       correction
     );
     if (!candidate) {
-      continue; // Malformed JSON; retry if attempts remain.
+      continue; // Malformed JSON / failed call; retry if attempts remain.
     }
 
     // Cheap local raw-English scan (works even where the validator can't run).
     const leaked = nonKlingonTokens(candidate.klingon);
 
-    // yajwiz parse (server-to-server). Null when the validator is unreachable.
+    // yajwiz parse (server-to-server). Skipped once the validator has failed.
     let validation: ValidationResult | null = null;
-    if (origin) {
+    if (origin && !validatorDown) {
       const started = performance.now();
       validation = await validateKlingon(candidate.klingon, origin, signal);
       validationMs += performance.now() - started;
       if (validation) validatorSeen = true;
+      else validatorDown = true; // Circuit-break: don't call it again.
     }
 
     const lines: string[] = [];
@@ -881,7 +921,8 @@ async function generateWarpAnswer(
     question,
     SCHEMA_WARP,
     apiKey,
-    signal
+    signal,
+    WARP_TIMEOUT_MS // Warp is a single call; let it use its whole budget.
   );
   if (!obj) {
     return null;

@@ -9,7 +9,11 @@
 import { isKlingonWord } from "@/lib/klingon-orthography";
 
 const VALIDATOR_PATH = "/api/validate-klingon";
-const VALIDATOR_TIMEOUT_MS = 7_000;
+// Kept tight: the grounded path may call this once per attempt, serially, on the
+// critical path. A warm validator answers in well under a second; if it's cold
+// or unreachable, we'd rather cut it off fast and degrade than stack up multi-
+// second waits. (The caller also circuit-breaks after the first failure.)
+const VALIDATOR_TIMEOUT_MS = 4_000;
 
 /**
  * Where the yajwiz validator lives. By default it's a same-origin Python
