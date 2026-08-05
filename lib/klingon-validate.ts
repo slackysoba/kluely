@@ -119,9 +119,10 @@ function contentTokens(text: string): Set<string> {
  * Whether the Klingon's *validated* meaning (the glosses yajwiz resolved for
  * each word) reflects the intended English. Lenient: only clear drift, where
  * almost none of the Klingon's meaning maps back to the intent, counts as
- * divergence — good paraphrases must not be punished.
+ * divergence — good paraphrases must not be punished. Pass the text the Klingon
+ * actually renders (the propositions) for the tightest comparison.
  */
-function meaningAligned(english: string, v: ValidationResult): boolean {
+export function meaningAligned(english: string, v: ValidationResult): boolean {
   const intended = contentTokens(english);
   const meaning = new Set<string>();
   for (const word of v.words) {

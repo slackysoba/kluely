@@ -18,10 +18,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { NextResponse } from "next/server";
+import { lemmaCandidates } from "@/lib/english-normalize";
 import { KLINGON_GRAMMAR_PRIMER } from "@/lib/klingon-grammar";
 import { nonKlingonTokens } from "@/lib/klingon-orthography";
+import { conceptSynonyms } from "@/lib/klingon-synonyms";
 import {
   backTranslate,
+  meaningAligned,
   validateKlingon,
   type Confidence,
   type ValidationResult,
@@ -377,25 +380,28 @@ async function generateEnglishAndSimplification(
   };
 }
 
-/** English lemmas an English concept should be looked up under. */
+/**
+ * English lookup keys for a concept, ordered most-faithful-first. The concept's
+ * own lemma candidates (inflectional + derivational normalisation toward the
+ * dictionary's base forms — see lib/english-normalize) come first so a direct
+ * sense always wins; then near-synonym / hypernym bridges (lib/klingon-synonyms)
+ * so a concept whose Klingon root is filed under a different gloss word
+ * ("problem" → Qatlh "difficult"; "team" → ghom "group") can still be reached.
+ */
 function lookupKeys(concept: string): string[] {
-  const base = concept.toLowerCase().replace(/\s+/g, " ").trim();
-  const keys = new Set<string>([base]);
-  // Cheap morphological fallbacks toward the dictionary's lemma form.
-  if (base.endsWith("ies") && base.length > 4) keys.add(base.slice(0, -3) + "y");
-  if (base.endsWith("es") && base.length > 3) keys.add(base.slice(0, -2));
-  if (base.endsWith("s") && base.length > 2) keys.add(base.slice(0, -1));
-  if (base.endsWith("ing") && base.length > 4) {
-    keys.add(base.slice(0, -3));
-    keys.add(base.slice(0, -3) + "e");
+  const keys: string[] = [];
+  const seen = new Set<string>();
+  const push = (key: string) => {
+    if (key && !seen.has(key)) {
+      seen.add(key);
+      keys.push(key);
+    }
+  };
+  for (const key of lemmaCandidates(concept)) push(key);
+  for (const synonym of conceptSynonyms(concept)) {
+    for (const key of lemmaCandidates(synonym)) push(key);
   }
-  if (base.endsWith("ed") && base.length > 3) {
-    keys.add(base.slice(0, -2));
-    keys.add(base.slice(0, -1));
-  }
-  // Klingon qualities are "be X" adjectival verbs.
-  keys.add("be " + base);
-  return [...keys];
+  return keys;
 }
 
 /**
@@ -655,16 +661,26 @@ function formatVocabulary(vocab: LexiconSense[]): string {
 async function generateKlingon(
   propositions: string[],
   vocab: LexiconSense[],
+  unresolved: string[],
   apiKey: string,
   signal: AbortSignal,
   correction = ""
 ): Promise<{ klingon: string; backTranslation?: string } | null> {
   const corrections = correction ? `\n\n${correction}` : "";
+  // Naming the words we could NOT ground steers the model to substitute a
+  // nearby verified meaning for exactly those words, instead of quietly
+  // inventing a Klingon-looking root (which the gate would then reject).
+  const gaps =
+    unresolved.length > 0
+      ? `\n\nNO VERIFIED ROOT was found for these content words: ${unresolved.join(
+          ", "
+        )}. For each, express the meaning with the closest word in the vocabulary above (a synonym or broader category) — do NOT invent a root, and do NOT leave the English word.`
+      : "";
   const userText = `VERIFIED VOCABULARY (klingon — gloss [part of speech]) — prefer these content roots:
 ${formatVocabulary(vocab)}
 
 SIMPLIFIED PROPOSITIONS TO RENDER IN KLINGON (translate these literal statements faithfully):
-${propositions.map((p, i) => `${i + 1}. ${p}`).join("\n")}${corrections}`;
+${propositions.map((p, i) => `${i + 1}. ${p}`).join("\n")}${gaps}${corrections}`;
 
   const obj = await callGemini(
     SYSTEM_KLINGON,
@@ -737,11 +753,16 @@ async function generateGroundedAnswer(
   // Ground the vocabulary on the actual words in the propositions first (so
   // every content word being translated has a candidate), then the model's
   // concept synonyms, then generic seeds — all resolved semantically by gloss.
+  const propTerms = propositionTerms(ec.propositions);
   const vocab = verifiedVocabulary([
-    ...propositionTerms(ec.propositions),
+    ...propTerms,
     ...ec.concepts,
     ...SEED_CONCEPTS,
   ]);
+
+  // Content words from the propositions that resolved to no verified root, so
+  // the translator is told to substitute (not invent) for exactly those.
+  const unresolved = propTerms.filter((t) => lexiconMatches(t, 1).length === 0);
 
   let best: {
     klingon: string;
@@ -757,6 +778,7 @@ async function generateGroundedAnswer(
     const candidate = await generateKlingon(
       ec.propositions,
       vocab,
+      unresolved,
       apiKey,
       signal,
       correction
@@ -792,11 +814,18 @@ async function generateGroundedAnswer(
       };
     }
 
-    // Passed the gate — but "high" requires the validator to have actually run.
+    // Passed the grammar gate — but "high" requires the validator to have
+    // actually run AND the validated meaning to still track the propositions.
+    // A grammatically perfect rendering that drifted in meaning is the exact
+    // failure mode the user feels as a bad translation, so it must not read as
+    // verified. We downgrade (flag approximate) rather than retry: the check is
+    // lenient, and a clean-but-drifted parse rarely improves on a re-roll, so
+    // spending another generate+validate round-trip isn't worth the latency.
     if (lines.length === 0) {
       if (validation) {
+        const aligned = meaningAligned(ec.propositions.join(" "), validation);
         return toAnswerPayload(ec.english, candidate.klingon, {
-          confidence: "high",
+          confidence: aligned ? "high" : "low",
           // Prefer the parse-derived literal (accurate, structure-revealing);
           // fall back to the model's own gloss if the parse yielded nothing.
           backTranslation: backTranslate(validation) || candidate.backTranslation,
