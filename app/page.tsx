@@ -18,6 +18,11 @@ import {
   AssemblyAIStream,
   SessionCapacityError,
 } from "@/lib/assemblyai-stream";
+import { InworldStream } from "@/lib/inworld-stream";
+import type {
+  TranscriptionCallbacks,
+  TranscriptionProvider,
+} from "@/lib/transcription-provider";
 import Image from "next/image";
 import Link from "next/link";
 import Wordmark from "@/components/Wordmark";
@@ -246,6 +251,16 @@ interface HistoryEntry extends AnswerPayload {
 }
 
 type CaptureMode = "practice" | "live";
+
+// Which streaming transcription backend feeds the pipeline. Both clients
+// implement TranscriptionProvider, so the choice is purely which class we
+// instantiate — nothing downstream branches on it.
+type Provider = "inworld" | "assemblyai";
+
+const PROVIDER_LABELS: Record<Provider, string> = {
+  inworld: "Inworld",
+  assemblyai: "AssemblyAI",
+};
 
 type SessionErrorKind =
   | "mic-denied"
@@ -733,7 +748,7 @@ export default function Home() {
   const isDesktopBrowser = useIsDesktopBrowser();
 
   const captureRef = useRef<AudioCapture | null>(null);
-  const streamRef = useRef<AssemblyAIStream | null>(null);
+  const streamRef = useRef<TranscriptionProvider | null>(null);
   const answerAbortRef = useRef<AbortController | null>(null);
   const sessionStartRef = useRef<number | null>(null);
   const historyIdRef = useRef(0);
@@ -747,6 +762,8 @@ export default function Home() {
   const validationSamplesRef = useRef<number[]>([]);
 
   const [mode, setMode] = useState<CaptureMode>("practice");
+  // Inworld is the default transcription backend; AssemblyAI is the fallback.
+  const [provider, setProvider] = useState<Provider>("inworld");
   const [running, setRunning] = useState(false);
   const [starting, setStarting] = useState(false);
   const [currentQuestion, setCurrentQuestion] = useState("");
@@ -958,21 +975,23 @@ export default function Home() {
     setAnswerError(null);
     setAnswerLoading(false);
 
-    const stream = new AssemblyAIStream({
-      onPartialTranscript: (turn) => setPartial(turn.transcript),
+    // One callback bag, wired to whichever provider is selected — both
+    // implement TranscriptionProvider, so nothing downstream branches.
+    const callbacks: TranscriptionCallbacks = {
+      onPartialTranscript: (result) => setPartial(result.transcript),
       onWordEmissionLatency: (p50) => setWordEmissionMs(p50),
       onTurnDetectionLatency: (p50) => setTurnDetectionMs(p50),
-      onFinalTranscript: (turn) => {
+      onFinalTranscript: (result) => {
         setPartial("");
-        if (turn.transcript) {
+        if (result.transcript) {
           // Anchor the end-to-end clock the instant the turn finalizes; the
           // paint effect above stops it when this turn's answer renders.
           turnEndAtRef.current = performance.now();
           // The previous answer becomes history; this turn takes the stage.
           archiveCurrent();
-          setCurrentQuestion(turn.transcript);
+          setCurrentQuestion(result.transcript);
           setAnswer(null);
-          void requestAnswer(turn.transcript);
+          void requestAnswer(result.transcript);
         }
       },
       onError: () => setSessionError("connection"),
@@ -980,7 +999,11 @@ export default function Home() {
         // Covers server-side closes and the hidden-tab auto-terminate.
         void stopPipeline();
       },
-    });
+    };
+    const stream: TranscriptionProvider =
+      provider === "inworld"
+        ? new InworldStream(callbacks)
+        : new AssemblyAIStream(callbacks);
     const capture = new AudioCapture();
     streamRef.current = stream;
     captureRef.current = capture;
@@ -1027,7 +1050,7 @@ export default function Home() {
     } finally {
       setStarting(false);
     }
-  }, [mode, requestAnswer, stopPipeline, archiveCurrent]);
+  }, [mode, provider, requestAnswer, stopPipeline, archiveCurrent]);
 
   const toggleRecording = () => {
     if (running) {
@@ -1052,6 +1075,16 @@ export default function Home() {
     }
     setSessionError(null);
     setMode(next);
+  };
+
+  // The provider toggle is locked while a session is live (see the disabled
+  // buttons below), so switching always happens from a stopped state.
+  const switchProvider = (next: Provider) => {
+    if (next === provider || running || starting) {
+      return;
+    }
+    setSessionError(null);
+    setProvider(next);
   };
 
   const active = running || starting;
@@ -1230,7 +1263,7 @@ export default function Home() {
                         }`}
                       />
                       <span className="text-[10px] uppercase tracking-[0.14em] text-faint">
-                        {mode}
+                        {mode} · {PROVIDER_LABELS[provider]}
                       </span>
                     </div>
                   </div>
@@ -1335,6 +1368,35 @@ export default function Home() {
                   {mode === "practice"
                     ? "Uses your own microphone as input"
                     : "Captures a browser tab — answering what they ask."}
+                </p>
+                {/* Transcription backend. Locked while a session is live —
+                    switching requires stopping first. */}
+                <div
+                  className="mt-5 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs lg:text-sm"
+                  role="group"
+                  aria-label="Transcription provider"
+                >
+                  {(["inworld", "assemblyai"] as const).map((p) => (
+                    <button
+                      key={p}
+                      type="button"
+                      aria-pressed={provider === p}
+                      disabled={active}
+                      onClick={() => switchProvider(p)}
+                      className={`rounded-full px-3.5 py-1 transition-colors lg:px-4 ${
+                        provider === p
+                          ? "bg-background font-medium text-foreground"
+                          : "text-muted hover:text-foreground"
+                      } ${active ? "cursor-not-allowed opacity-60" : ""}`}
+                    >
+                      {PROVIDER_LABELS[p]}
+                    </button>
+                  ))}
+                </div>
+                <p className="text-xs text-faint lg:text-sm">
+                  Transcribing with{" "}
+                  <span className="text-muted">{PROVIDER_LABELS[provider]}</span>
+                  {active ? " · locked while listening" : ""}
                 </p>
               </header>
 

@@ -1,3 +1,15 @@
+import type {
+  SessionEndInfo,
+  SessionState,
+  TranscriptionCallbacks,
+  TranscriptionProvider,
+} from "./transcription-provider";
+import { SessionCapacityError } from "./transcription-provider";
+
+// Re-exported so existing importers (e.g. app/page.tsx) can keep sourcing it
+// from this module.
+export { SessionCapacityError };
+
 const TOKEN_ENDPOINT = "/api/token";
 const STREAMING_ENDPOINT = "wss://streaming.assemblyai.com/v3/ws";
 const SAMPLE_RATE = 16000;
@@ -56,48 +68,23 @@ type ServerMessage =
   | TerminationMessage
   | { type: string };
 
-export type SessionState =
-  | "idle"
-  | "connecting"
-  | "open"
-  | "terminating"
-  | "closed";
+export type { SessionState };
 
-export interface AssemblyAIStreamCallbacks {
-  /** Turn message with end_of_turn: false — in-progress transcript. */
-  onPartialTranscript?: (turn: TurnMessage) => void;
-  /** Turn message with end_of_turn: true — finalized, formatted transcript. */
-  onFinalTranscript?: (turn: TurnMessage) => void;
-  /**
-   * Fired whenever the rolling-median (p50) word-emission latency updates: the
-   * time from a word finishing in the audio to that word first appearing in a
-   * Turn message (partial or final), in milliseconds. This is the streaming
-   * latency AssemblyAI publishes (~150ms server-side), measured end-to-end in
-   * the browser so it also carries network round-trip and client buffering.
-   */
-  onWordEmissionLatency?: (p50Ms: number) => void;
-  /**
-   * Fired whenever the rolling-median (p50) turn-detection latency updates: the
-   * time from speech stopping (the last word's audio end) to the server
-   * signalling the turn is complete (end_of_turn), in milliseconds. Reflects
-   * Universal-Streaming's endpointing and turn-detection speed.
-   */
-  onTurnDetectionLatency?: (p50Ms: number) => void;
-  onError?: (error: Error) => void;
-  /**
-   * Fired once when the session is over, however it ended. `termination` is
-   * the server's Termination message (with billed session duration) when the
-   * session ended cleanly, or null if the socket dropped without one.
-   */
-  onSessionEnd?: (termination: TerminationMessage | null) => void;
-}
+// The AssemblyAI client speaks the shared provider callback contract. The
+// alias is kept for readability at call sites specific to this client.
+export type AssemblyAIStreamCallbacks = TranscriptionCallbacks;
 
-/** Thrown when the demo's session-concurrency cap rejects a new session. */
-export class SessionCapacityError extends Error {
-  constructor() {
-    super("All demo session slots are currently in use");
-    this.name = "SessionCapacityError";
+/** Maps AssemblyAI's Termination message onto the shared session summary. */
+function toSessionEndInfo(
+  termination: TerminationMessage | null
+): SessionEndInfo | null {
+  if (!termination) {
+    return null;
   }
+  return {
+    audioDurationSeconds: termination.audio_duration_seconds,
+    sessionDurationSeconds: termination.session_duration_seconds,
+  };
 }
 
 /** Rounded median (p50) of a sample window, or null when it's empty. */
@@ -141,8 +128,8 @@ function parseServerMessage(raw: string): ServerMessage | null {
  * await stream.stop();
  * ```
  */
-export class AssemblyAIStream {
-  private readonly callbacks: AssemblyAIStreamCallbacks;
+export class AssemblyAIStream implements TranscriptionProvider {
+  private readonly callbacks: TranscriptionCallbacks;
   private ws: WebSocket | null = null;
   private state: SessionState = "idle";
   private sessionId: string | null = null;
@@ -165,7 +152,7 @@ export class AssemblyAIStream {
   private measuredTurnOrder: number | null = null;
   private measuredWordCount = 0;
 
-  constructor(callbacks: AssemblyAIStreamCallbacks = {}) {
+  constructor(callbacks: TranscriptionCallbacks = {}) {
     this.callbacks = callbacks;
   }
 
@@ -510,7 +497,7 @@ export class AssemblyAIStream {
       return;
     }
     this.sessionEnded = true;
-    this.callbacks.onSessionEnd?.(this.terminationInfo);
+    this.callbacks.onSessionEnd?.(toSessionEndInfo(this.terminationInfo));
   }
 
   // Arrow properties so `this` stays bound when used as event listeners.
