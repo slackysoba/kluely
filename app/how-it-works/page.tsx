@@ -92,13 +92,13 @@ export default function HowItWorksPage() {
         Kluely captures microphone audio (or, in Live mode, browser-tab audio).
         An AudioWorklet resamples it to 16&nbsp;kHz, mono, 16-bit PCM and splits
         it into 50-millisecond chunks. These stream over a WebSocket directly to
-        a real-time speech-to-text provider &mdash; Inworld by default, with a
-        toggle on the home screen to switch to AssemblyAI. Both are wired behind
-        one interface, so the rest of the pipeline is identical either way.
-        Authentication uses a short-lived token minted server-side; the API key
-        never reaches the browser. The provider returns transcript text as you
-        speak and, through automatic turn detection, signals &ldquo;end of
-        turn&rdquo; when a thought is complete.
+        the chosen real-time speech-to-text provider, selectable on the home
+        screen. Whichever is active is wired behind one interface, so the rest
+        of the pipeline is identical either way. Authentication uses a
+        short-lived token minted server-side; the API key never reaches the
+        browser. The provider returns transcript text as you speak and, through
+        automatic turn detection, signals &ldquo;end of turn&rdquo; when a
+        thought is complete.
       </p>
 
       <SectionHeading>Handoff to the language model</SectionHeading>

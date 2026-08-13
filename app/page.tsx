@@ -56,11 +56,11 @@ const METRIC_INFO = {
     "transcription, the language model, validation, and rendering.",
   wordEmission:
     "Median time from a word finishing in your audio to it appearing as " +
-    "transcribed text. That's network and buffering on top of AssemblyAI's " +
-    "~150ms server figure.",
+    "transcribed text. That's network and buffering on top of the STT " +
+    "provider's server-side latency.",
   turnDetection:
-    "Time from when you stop speaking to when AssemblyAI marks the turn " +
-    "complete. Reflects its endpointing speed.",
+    "Time from when you stop speaking to when the STT provider marks the " +
+    "turn complete. Reflects its endpointing speed.",
   validation:
     "Time spent checking the Klingon's morphology and regenerating when a " +
     "check fails. The answer waits for this. Warp skips it.",
