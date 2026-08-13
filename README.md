@@ -28,11 +28,11 @@ Five stages, two external services:
                                         └──────────┬──────────┘
                                                    │ ArrayBuffer chunks
                                                    ▼
-┌─────────────────────┐   binary frames   ┌─────────────────────┐
-│ AssemblyAI          │ ◄──────────────── │ WebSocket client    │
-│ Universal-Streaming │ ────────────────► │ (temp token auth)   │
-│ v3 WebSocket        │   Turn messages   └──────────┬──────────┘
-└─────────────────────┘                              │ end_of_turn: true
+┌─────────────────────┐   audio frames    ┌─────────────────────┐
+│ STT provider:       │ ◄──────────────── │ WebSocket client    │
+│ Inworld (default)   │ ────────────────► │ (temp token auth)   │
+│ or AssemblyAI       │  transcript msgs  └──────────┬──────────┘
+└─────────────────────┘                              │ end of turn
                                                      ▼
 ┌─────────────────────┐   structured JSON  ┌─────────────────────┐
 │ Gemini Flash-Lite   │ ◄───────────────── │ POST /api/answer    │
@@ -55,11 +55,16 @@ Five stages, two external services:
    to 16 kHz with linear interpolation (continuous across render
    quanta), converts to 16-bit PCM, and posts 50 ms chunks (800 samples)
    to the main thread as transferred `ArrayBuffer`s.
-2. **Transcribe** — chunks stream over a WebSocket to AssemblyAI's v3
-   Universal-Streaming endpoint, authenticated with a short-lived token.
+2. **Transcribe** — chunks stream over a WebSocket to a real-time
+   speech-to-text provider, authenticated with a short-lived token.
+   Inworld Realtime STT is the default; a toggle on the home screen
+   switches to AssemblyAI Universal-Streaming. Both clients implement one
+   `TranscriptionProvider` interface (`lib/transcription-provider.ts`), so
+   the choice is just which class the pipeline instantiates — nothing
+   downstream branches on it.
 3. **Detect** — the client separates partial transcripts from finalized
-   turns (`end_of_turn: true`). Partials paint the live transcript;
-   finals trigger generation.
+   turns (each provider's automatic turn detection). Partials paint the
+   live transcript; finals trigger generation.
 4. **Generate** — the finalized question goes to a server route that
    calls Gemini Flash-Lite in structured-output mode, with a Klingon
    grammar primer in the system instruction and a response schema pinning
@@ -90,8 +95,12 @@ const { token } = await response.json();
 return NextResponse.json({ token }); // browser gets only this
 ```
 
-The Gemini key follows the same rule by construction: it is only read
-inside a server route.
+Inworld follows the same pattern: `app/api/inworld-token` mints a
+short-lived Inworld session token server-side (signing a per-request
+`IW1-HMAC-SHA256` header with the key/secret to exchange for the token),
+and the browser passes it on the STT socket the same way. The Gemini key
+follows the rule by construction too: it is only read inside a server
+route.
 
 ## Technical notes
 
@@ -103,9 +112,9 @@ sample of history across 128-frame render quanta (no seams at block
 boundaries), and hands buffers to the main thread zero-copy via
 transfer.
 
-**Finals versus partials.** Universal-Streaming emits many `Turn`
-messages per utterance; only the one with `end_of_turn: true` is stable,
-formatted text. Partials are rendered but never trigger generation —
+**Finals versus partials.** Streaming STT emits many partial transcripts
+per utterance; only the finalized turn (the provider's end-of-turn
+signal) is stable text. Partials are rendered but never trigger generation —
 firing an LLM call per partial would send malformed fragments and burn
 quota. Generation is therefore debounced on turn finalization, and if a
 new final lands while a request is in flight, the stale request is
@@ -115,20 +124,20 @@ for the UI.
 **Session lifecycle.** Streaming is billed on wall-clock connection
 time, not audio sent. An abandoned socket keeps billing until the server
 force-closes it after three hours. The client therefore treats
-termination as a protocol, not a cleanup afterthought: `stop()` sends
-`{"type": "Terminate"}` and waits for the server's `Termination` message
-before closing (closing early silently discards the last transcript), a
+termination as a protocol, not a cleanup afterthought: `stop()` signals
+the provider to finish (AssemblyAI `{"type": "Terminate"}`, Inworld
+`{"closeStream": {}}`) and waits for the server to flush the last
+transcript before closing (closing early silently discards it), a
 `beforeunload` handler terminates on page exit, a `visibilitychange`
 timer terminates after 30 s of hidden tab, and every error path closes
-the socket.
+the socket. Both provider clients apply this identical discipline.
 
 **Latency.** The status bar shows a live measurement: the interval
 between sending the final audio chunk of a turn and receiving that
-turn's finalized transcript. Expect low hundreds of milliseconds on a
-typical connection, in line with AssemblyAI's published figures for
-immutable finalization; the Gemini round trip adds roughly one to two
-seconds on top before the answer card renders. Treat the in-app number
-as the honest one — it includes your actual network.
+turn's finalized transcript. Both providers measure it the same way, so
+the readout is comparable across the toggle; the Gemini round trip adds
+roughly one to two seconds on top before the answer card renders. Treat
+the in-app number as the honest one — it includes your actual network.
 
 ## Limitations and tradeoffs
 
@@ -159,11 +168,14 @@ microphone access.
 ```sh
 git clone <repo-url> && cd kluely-app
 npm install
-cp .env.example .env.local   # then fill in both keys
+cp .env.example .env.local   # then fill in the keys
 npm run dev
 ```
 
-- `ASSEMBLYAI_API_KEY` — from the AssemblyAI dashboard.
+- `INWORLD_API_KEY` — the Base64 key from the Inworld Studio API Keys
+  panel (the default transcription provider).
+- `ASSEMBLYAI_API_KEY` — from the AssemblyAI dashboard (used when the
+  provider toggle is set to AssemblyAI).
 - `GEMINI_API_KEY` — from Google AI Studio.
 
 Open `http://localhost:3000` (localhost counts as a secure context, so
@@ -173,8 +185,10 @@ question out loud. Production deployments need HTTPS and should set
 
 ## Credits
 
+- [Inworld](https://inworld.ai/) — Realtime speech-to-text (default
+  provider).
 - [AssemblyAI](https://www.assemblyai.com/) — Universal-Streaming v3
-  speech-to-text.
+  speech-to-text (alternate provider).
 - [Google Gemini](https://ai.google.dev/) — answer generation
   (Flash-Lite, structured output).
 - [pIqaD qolqoS](https://github.com/dadap/pIqaD-fonts) by Daniel Dadap —

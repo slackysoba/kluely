@@ -41,13 +41,32 @@ const HIDDEN_TAB_TERMINATE_MS = 30_000;
 const OPEN_TIMEOUT_MS = 10_000;
 const CLOSE_TIMEOUT_MS = 5_000;
 
+// Latency measurement — kept identical to lib/assemblyai-stream.ts so the two
+// providers feed the same metrics with the same semantics.
+const BYTES_PER_SAMPLE = 2; // 16-bit mono PCM ⇒ 2 bytes per sample.
+const LATENCY_WINDOW = 50; // rolling window of per-word latency samples.
+const MAX_PLAUSIBLE_LATENCY_MS = 5_000; // above this is a stale anchor, not real.
+const MAX_PLAUSIBLE_TURN_MS = 10_000; // turn detection includes the endpoint wait.
+
 // The Inworld client speaks the shared provider callback contract; the alias
 // keeps call sites specific to this client readable.
 export type InworldStreamCallbacks = TranscriptionCallbacks;
 
+interface InworldWord {
+  word: string;
+  confidence: number;
+  /** Offset from the start of the audio to the start of this word, in ms. */
+  startTimeMs: number;
+  /** Offset from the start of the audio to the end of this word, in ms. */
+  endTimeMs: number;
+  speaker?: number;
+}
+
 interface TranscriptionPayload {
   transcript?: string;
   isFinal?: boolean;
+  /** Per-word timing, present because we request includeWordTimestamps. */
+  wordTimestamps?: InworldWord[];
 }
 
 interface UsagePayload {
@@ -79,6 +98,18 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
     binary += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
   }
   return btoa(binary);
+}
+
+/** Rounded median (p50) of a sample window, or null when it's empty. */
+function median(samples: number[]): number | null {
+  const n = samples.length;
+  if (n === 0) {
+    return null;
+  }
+  const sorted = [...samples].sort((a, b) => a - b);
+  const mid = Math.floor(n / 2);
+  const value = n % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+  return Math.round(value);
 }
 
 function parseServerMessage(raw: string): InworldServerMessage | null {
@@ -120,6 +151,13 @@ export class InworldStream implements TranscriptionProvider {
   private onClosed: (() => void) | null = null;
   private hiddenTimer: number | null = null;
   private listenersAttached = false;
+  // Latency measurement: anchor audio-stream time 0 to the wall clock, then for
+  // each word compare (message received) − (audio sent) and report a rolling
+  // median — identical to the AssemblyAI client.
+  private audioClockBase: number | null = null;
+  private latencySamples: number[] = [];
+  private turnLatencySamples: number[] = [];
+  private measuredWordCount = 0;
 
   constructor(callbacks: TranscriptionCallbacks = {}) {
     this.callbacks = callbacks;
@@ -135,15 +173,14 @@ export class InworldStream implements TranscriptionProvider {
     return null;
   }
 
-  // Latency is not measured for Inworld yet; the shared getters exist so the
-  // provider satisfies the interface. (Word/turn timing could later be derived
-  // from wordTimestamps + speechStopped once includeWordTimestamps is enabled.)
+  /** Rolling median (p50) word-emission latency in ms, or null before any word. */
   get wordEmissionP50Ms(): number | null {
-    return null;
+    return median(this.latencySamples);
   }
 
+  /** Rolling median (p50) turn-detection latency in ms, or null before any turn. */
   get turnDetectionP50Ms(): number | null {
-    return null;
+    return median(this.turnLatencySamples);
   }
 
   /** Fetches a token, opens the socket, and resolves once it's ready for audio. */
@@ -154,6 +191,10 @@ export class InworldStream implements TranscriptionProvider {
     this.state = "connecting";
     this.sessionEnded = false;
     this.usage = null;
+    this.audioClockBase = null;
+    this.latencySamples = [];
+    this.turnLatencySamples = [];
+    this.measuredWordCount = 0;
 
     let token: string;
     try {
@@ -217,6 +258,15 @@ export class InworldStream implements TranscriptionProvider {
     this.ws.send(
       JSON.stringify({ audioChunk: { content: arrayBufferToBase64(chunk) } })
     );
+    // Anchor stream time 0 to the wall clock on the first chunk, so a word's
+    // endTimeMs can be mapped back to the moment its audio was sent.
+    if (this.audioClockBase === null) {
+      const chunkMs =
+        (chunk.byteLength / BYTES_PER_SAMPLE / SAMPLE_RATE) * 1000;
+      // This first chunk carries stream time [0, chunkMs); its last sample was
+      // just captured, so stream time 0 sits chunkMs in the past.
+      this.audioClockBase = performance.now() - chunkMs;
+    }
   }
 
   /**
@@ -288,6 +338,8 @@ export class InworldStream implements TranscriptionProvider {
             audioEncoding: AUDIO_ENCODING,
             sampleRateHertz: SAMPLE_RATE,
             language: LANGUAGE,
+            // Per-word timing drives the word-emission / turn-detection metrics.
+            includeWordTimestamps: true,
           },
         })
       );
@@ -333,12 +385,87 @@ export class InworldStream implements TranscriptionProvider {
 
     const transcription = result.transcription;
     if (transcription && typeof transcription.transcript === "string") {
+      // Measure word-emission latency on every result — partial or final —
+      // from each word's first appearance.
+      this.recordWordLatencies(transcription.wordTimestamps);
       const payload = { transcript: transcription.transcript };
       if (transcription.isFinal) {
+        // Turn-detection latency is only meaningful on the finalized turn.
+        this.recordTurnLatency(transcription.wordTimestamps);
+        // The next utterance is a fresh turn, so restart word counting.
+        this.measuredWordCount = 0;
         this.callbacks.onFinalTranscript?.(payload);
       } else {
         this.callbacks.onPartialTranscript?.(payload);
       }
+    }
+  }
+
+  /**
+   * Records the transcription latency of every newly-appeared word in a result:
+   * the delay between sending the audio through that word's end and receiving
+   * the message that first contains it. Runs on partials and finals, since a
+   * word usually surfaces in a partial first. Mirrors the AssemblyAI client's
+   * word-emission metric.
+   */
+  private recordWordLatencies(words: InworldWord[] | undefined): void {
+    if (this.audioClockBase === null || !words || words.length === 0) {
+      return;
+    }
+    // Inworld's partials are cumulative within a turn; a shorter array than
+    // we've already measured means a new turn started, so reset the counter.
+    if (words.length < this.measuredWordCount) {
+      this.measuredWordCount = 0;
+    }
+    if (words.length <= this.measuredWordCount) {
+      return;
+    }
+    const receivedAt = performance.now();
+    for (let i = this.measuredWordCount; i < words.length; i++) {
+      // audioClockBase + endTimeMs is the wall-clock moment that audio was sent.
+      const audioSentAt = this.audioClockBase + words[i].endTimeMs;
+      const latency = receivedAt - audioSentAt;
+      if (latency >= 0 && latency < MAX_PLAUSIBLE_LATENCY_MS) {
+        this.pushLatencySample(latency);
+      }
+    }
+    this.measuredWordCount = words.length;
+  }
+
+  private pushLatencySample(ms: number): void {
+    this.latencySamples.push(ms);
+    if (this.latencySamples.length > LATENCY_WINDOW) {
+      this.latencySamples.shift();
+    }
+    const p50 = median(this.latencySamples);
+    if (p50 !== null) {
+      this.callbacks.onWordEmissionLatency?.(p50);
+    }
+  }
+
+  /**
+   * Records turn-detection latency for a finalized turn: the delay between the
+   * moment speech stopped (the last word's audio end) and receiving the
+   * isFinal result. Mirrors the AssemblyAI client's turn-detection metric.
+   */
+  private recordTurnLatency(words: InworldWord[] | undefined): void {
+    if (this.audioClockBase === null || !words || words.length === 0) {
+      return;
+    }
+    const lastWord = words[words.length - 1];
+    // audioClockBase + endTimeMs is the wall-clock moment speech stopped.
+    const speechStoppedAt = this.audioClockBase + lastWord.endTimeMs;
+    const latency = performance.now() - speechStoppedAt;
+    if (latency < 0 || latency >= MAX_PLAUSIBLE_TURN_MS) {
+      return;
+    }
+    this.turnLatencySamples.push(latency);
+    if (this.turnLatencySamples.length > LATENCY_WINDOW) {
+      this.turnLatencySamples.shift();
+    }
+    const p50 = median(this.turnLatencySamples);
+    if (p50 !== null) {
+      this.callbacks.onTurnDetectionLatency?.(p50);
     }
   }
 

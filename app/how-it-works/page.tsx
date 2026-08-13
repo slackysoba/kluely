@@ -91,20 +91,22 @@ export default function HowItWorksPage() {
       <p className="mt-3 text-sm leading-7 text-muted">
         Kluely captures microphone audio (or, in Live mode, browser-tab audio).
         An AudioWorklet resamples it to 16&nbsp;kHz, mono, 16-bit PCM and splits
-        it into 50-millisecond chunks. These stream over a WebSocket to
-        AssemblyAI&apos;s Universal-Streaming API (v3 real-time model) at a
-        16&nbsp;kHz sample rate. Authentication uses a temporary, single-use
-        token minted server-side (expires in 60 seconds); the API key never
-        reaches the browser. AssemblyAI returns transcript text as you speak and
-        signals &ldquo;end of turn&rdquo; when a thought is complete.
+        it into 50-millisecond chunks. These stream over a WebSocket directly to
+        a real-time speech-to-text provider &mdash; Inworld by default, with a
+        toggle on the home screen to switch to AssemblyAI. Both are wired behind
+        one interface, so the rest of the pipeline is identical either way.
+        Authentication uses a short-lived token minted server-side; the API key
+        never reaches the browser. The provider returns transcript text as you
+        speak and, through automatic turn detection, signals &ldquo;end of
+        turn&rdquo; when a thought is complete.
       </p>
 
       <SectionHeading>Handoff to the language model</SectionHeading>
       <p className="mt-3 text-sm leading-7 text-muted">
         On end of turn, the client sends the finalized transcript to
-        Kluely&apos;s own server, which passes it to Google Gemini. AssemblyAI
-        and Gemini do not communicate directly; the app routes the transcript
-        between them.
+        Kluely&apos;s own server, which passes it to Google Gemini. The
+        transcription provider and Gemini do not communicate directly; the app
+        routes the transcript between them.
       </p>
 
       <SectionHeading>Translation and validation pipeline</SectionHeading>

@@ -262,6 +262,12 @@ const PROVIDER_LABELS: Record<Provider, string> = {
   assemblyai: "AssemblyAI",
 };
 
+// Home page for the active provider, used by the footer credit.
+const PROVIDER_URLS: Record<Provider, string> = {
+  inworld: "https://inworld.ai",
+  assemblyai: "https://www.assemblyai.com",
+};
+
 type SessionErrorKind =
   | "mic-denied"
   | "connection"
@@ -1515,13 +1521,13 @@ export default function Home() {
                 hidden from sm up. */}
             <HowItWorksLink className="inline-flex sm:hidden" />
             <a
-              href="https://www.assemblyai.com"
+              href={PROVIDER_URLS[provider]}
               target="_blank"
               rel="noopener noreferrer"
               onClick={handleDesktopExternalClick}
               className="text-muted transition-colors hover:text-foreground"
             >
-              Powered by AssemblyAI
+              Powered by {PROVIDER_LABELS[provider]}
             </a>
           </span>
         </div>
