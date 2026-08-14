@@ -1165,7 +1165,7 @@ export default function Home() {
         </span>
       </div>
 
-      <main className="flex w-full flex-1 flex-col px-6 pb-28 pt-8 sm:pb-16">
+      <main className="flex w-full flex-1 flex-col px-6 pb-28 pt-4 sm:pb-16">
         <LayoutGroup>
           {active ? (
             /* ---------- RECORDING: left rail + working stage ---------- */
@@ -1320,8 +1320,8 @@ export default function Home() {
             </div>
           ) : (
             /* ---------- IDLE: calm centered layout ---------- */
-            <div className="mx-auto flex w-full max-w-[720px] flex-col items-center gap-8 lg:max-w-[760px] lg:gap-9">
-              <header className="flex flex-col items-center gap-3 text-center">
+            <div className="mx-auto flex w-full max-w-[720px] flex-col items-center gap-6 lg:max-w-[760px] lg:gap-7">
+              <header className="flex flex-col items-center gap-2 text-center">
                 <h1
                   aria-label="Kluely"
                   className="flex items-center gap-3 sm:gap-3.5"
@@ -1341,7 +1341,7 @@ export default function Home() {
                 </p>
                 {/* Mode: makes the capture scope explicit */}
                 <div
-                  className="mt-6 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs lg:mt-7 lg:text-sm"
+                  className="mt-4 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs lg:mt-5 lg:text-sm"
                   role="group"
                   aria-label="Capture mode"
                 >
@@ -1378,7 +1378,7 @@ export default function Home() {
                 {/* Transcription backend. Locked while a session is live —
                     switching requires stopping first. */}
                 <div
-                  className="mt-5 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs lg:text-sm"
+                  className="mt-3 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs lg:text-sm"
                   role="group"
                   aria-label="Transcription provider"
                 >
@@ -1406,7 +1406,7 @@ export default function Home() {
                 </p>
               </header>
 
-              <div className="flex flex-col items-center gap-5">
+              <div className="flex flex-col items-center gap-4">
                 <div className="relative flex items-center justify-center">
                   <RecordOrb
                     variant="center"
