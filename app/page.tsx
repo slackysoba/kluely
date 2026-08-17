@@ -203,7 +203,7 @@ function DownloadOnDesktop() {
       target="_blank"
       rel="noopener noreferrer"
       onClick={handleDesktopExternalClick}
-      className="group flex items-center gap-2 rounded-full border border-line bg-surface px-3.5 py-1 text-foreground transition-colors hover:border-accent/70"
+      className="group flex items-center gap-2 rounded-md border border-line bg-surface px-3.5 py-1 text-foreground transition-colors hover:border-accent/70"
     >
       <svg
         aria-hidden="true"
@@ -560,7 +560,7 @@ function WarpToggle({
             : "Engage warp drive to bypass language validation for lower latency."
         }
         onClick={onToggle}
-        className={`flex w-full items-center justify-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] transition-all duration-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent ${
+        className={`flex w-full items-center justify-center gap-1.5 rounded-md border px-2.5 py-1.5 text-[10px] font-semibold uppercase tracking-[0.16em] transition-all duration-300 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-accent ${
           engaged
             ? "border-accent bg-accent text-background shadow-[0_0_14px_rgba(214,50,60,0.55)]"
             : "border-line bg-surface text-muted hover:border-accent/60 hover:text-foreground"
@@ -738,7 +738,7 @@ function StatePanel({
         <button
           type="button"
           onClick={onAction}
-          className="mt-2 rounded-full border border-line bg-background px-4 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-accent/70"
+          className="mt-2 rounded-md border border-line bg-background px-4 py-1.5 text-xs font-medium text-foreground transition-colors hover:border-accent/70"
         >
           {actionLabel}
         </button>
@@ -1348,7 +1348,7 @@ export default function Home() {
                 </p>
                 {/* Mode: makes the capture scope explicit */}
                 <div
-                  className="mt-4 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs lg:mt-5 lg:text-sm"
+                  className="mt-4 inline-flex items-center rounded-md border border-line bg-surface p-0.5 text-xs lg:mt-5 lg:text-sm"
                   role="group"
                   aria-label="Capture mode"
                 >
@@ -1356,7 +1356,7 @@ export default function Home() {
                     type="button"
                     aria-pressed={mode === "practice"}
                     onClick={() => switchMode("practice")}
-                    className={`rounded-full px-3.5 py-1 transition-colors lg:px-4 ${
+                    className={`rounded px-3.5 py-1 transition-colors lg:px-4 ${
                       mode === "practice"
                         ? "bg-background font-medium text-foreground"
                         : "text-muted hover:text-foreground"
@@ -1368,7 +1368,7 @@ export default function Home() {
                     type="button"
                     aria-pressed={mode === "live"}
                     onClick={() => switchMode("live")}
-                    className={`rounded-full px-3.5 py-1 transition-colors lg:px-4 ${
+                    className={`rounded px-3.5 py-1 transition-colors lg:px-4 ${
                       mode === "live"
                         ? "bg-background font-medium text-foreground"
                         : "text-muted hover:text-foreground"
@@ -1380,13 +1380,14 @@ export default function Home() {
                     type="button"
                     aria-pressed={mode === "notetaker"}
                     onClick={() => switchMode("notetaker")}
-                    className={`rounded-full px-3.5 py-1 transition-colors lg:px-4 ${
+                    className={`rounded px-3.5 py-1 transition-colors lg:px-4 ${
                       mode === "notetaker"
                         ? "bg-background font-medium text-foreground"
                         : "text-muted hover:text-foreground"
                     }`}
                   >
-                    Notetaker
+                    Notetaker{" "}
+                    <span className="text-[0.85em] opacity-70">(Beta)</span>
                   </button>
                 </div>
                 {/* Capture-scope hint + transcription-provider toggle apply
@@ -1402,7 +1403,7 @@ export default function Home() {
                     {/* Transcription backend. Locked while a session is live —
                         switching requires stopping first. */}
                     <div
-                      className="mt-3 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs lg:text-sm"
+                      className="mt-3 inline-flex items-center rounded-md border border-line bg-surface p-0.5 text-xs lg:text-sm"
                       role="group"
                       aria-label="Transcription provider"
                     >
@@ -1413,7 +1414,7 @@ export default function Home() {
                           aria-pressed={provider === p}
                           disabled={active}
                           onClick={() => switchProvider(p)}
-                          className={`rounded-full px-3.5 py-1 transition-colors lg:px-4 ${
+                          className={`rounded px-3.5 py-1 transition-colors lg:px-4 ${
                             provider === p
                               ? "bg-background font-medium text-foreground"
                               : "text-muted hover:text-foreground"
@@ -2067,13 +2068,13 @@ function NotetakerPanel({ fade }: { fade: object }) {
             }
           }}
           disabled={joining}
-          className="w-full rounded-full border border-line bg-surface px-4 py-2.5 text-sm text-foreground placeholder:text-faint focus-visible:border-accent focus-visible:outline-none disabled:opacity-60"
+          className="w-full rounded-md border border-line bg-surface px-4 py-2.5 text-sm text-foreground placeholder:text-faint focus-visible:border-accent focus-visible:outline-none disabled:opacity-60"
         />
         <button
           type="button"
           onClick={() => void join()}
           disabled={joining}
-          className="w-full rounded-full border border-accent bg-accent px-4 py-2.5 text-sm font-medium text-background transition-colors hover:bg-accent/90 disabled:opacity-60"
+          className="w-full rounded-md border border-accent bg-accent px-4 py-2.5 text-sm font-medium text-background transition-colors hover:bg-accent/90 disabled:opacity-60"
         >
           {joining ? "Sending the bot…" : "Join meeting"}
         </button>
@@ -2164,14 +2165,14 @@ function NotetakerPanel({ fade }: { fade: object }) {
           type="button"
           onClick={() => void copyTranscript()}
           disabled={lines.length === 0}
-          className="rounded-full border border-line bg-surface px-4 py-2 text-xs font-medium text-foreground transition-colors hover:border-accent/70 disabled:opacity-50"
+          className="rounded-md border border-line bg-surface px-4 py-2 text-xs font-medium text-foreground transition-colors hover:border-accent/70 disabled:opacity-50"
         >
           Copy transcript
         </button>
         <button
           type="button"
           onClick={() => void endAndDownload()}
-          className="rounded-full border border-accent bg-accent px-4 py-2 text-xs font-medium text-background transition-colors hover:bg-accent/90"
+          className="rounded-md border border-accent bg-accent px-4 py-2 text-xs font-medium text-background transition-colors hover:bg-accent/90"
         >
           End &amp; download transcript
         </button>
