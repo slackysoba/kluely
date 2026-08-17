@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   AnimatePresence,
   LayoutGroup,
@@ -250,7 +250,14 @@ interface HistoryEntry extends AnswerPayload {
   question: string;
 }
 
-type CaptureMode = "practice" | "live";
+// "notetaker" is not an audio-capture mode — it sends a Recall.ai bot into a
+// Zoom call instead of using the mic/tab pipeline — but it shares the top-level
+// mode switch, so it lives in the same union.
+type CaptureMode = "practice" | "live" | "notetaker";
+
+// localStorage key holding the active Recall bot id, so a reload can resume the
+// notetaker session (there is no auth/login — the client only knows its own id).
+const NOTETAKER_BOT_KEY = "kluely:notetaker:botId";
 
 // Which streaming transcription backend feeds the pipeline. Both clients
 // implement TranscriptionProvider, so the choice is purely which class we
@@ -1369,102 +1376,134 @@ export default function Home() {
                   >
                     Live
                   </button>
+                  <button
+                    type="button"
+                    aria-pressed={mode === "notetaker"}
+                    onClick={() => switchMode("notetaker")}
+                    className={`rounded-full px-3.5 py-1 transition-colors lg:px-4 ${
+                      mode === "notetaker"
+                        ? "bg-background font-medium text-foreground"
+                        : "text-muted hover:text-foreground"
+                    }`}
+                  >
+                    Notetaker
+                  </button>
                 </div>
-                <p className="text-xs text-faint lg:text-sm">
-                  {mode === "practice"
-                    ? "Uses your own microphone as input"
-                    : "Captures a browser tab — answering what they ask."}
-                </p>
-                {/* Transcription backend. Locked while a session is live —
-                    switching requires stopping first. */}
-                <div
-                  className="mt-3 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs lg:text-sm"
-                  role="group"
-                  aria-label="Transcription provider"
-                >
-                  {(["inworld", "assemblyai"] as const).map((p) => (
-                    <button
-                      key={p}
-                      type="button"
-                      aria-pressed={provider === p}
-                      disabled={active}
-                      onClick={() => switchProvider(p)}
-                      className={`rounded-full px-3.5 py-1 transition-colors lg:px-4 ${
-                        provider === p
-                          ? "bg-background font-medium text-foreground"
-                          : "text-muted hover:text-foreground"
-                      } ${active ? "cursor-not-allowed opacity-60" : ""}`}
+                {/* Capture-scope hint + transcription-provider toggle apply
+                    only to the mic/tab pipeline, so they're hidden in Notetaker
+                    mode (which uses Recall's own streaming transcription). */}
+                {mode !== "notetaker" && (
+                  <>
+                    <p className="text-xs text-faint lg:text-sm">
+                      {mode === "practice"
+                        ? "Uses your own microphone as input"
+                        : "Captures a browser tab — answering what they ask."}
+                    </p>
+                    {/* Transcription backend. Locked while a session is live —
+                        switching requires stopping first. */}
+                    <div
+                      className="mt-3 inline-flex items-center rounded-full border border-line bg-surface p-0.5 text-xs lg:text-sm"
+                      role="group"
+                      aria-label="Transcription provider"
                     >
-                      {PROVIDER_LABELS[p]}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-xs text-faint lg:text-sm">
-                  Transcribing with{" "}
-                  <span className="text-muted">{PROVIDER_LABELS[provider]}</span>
-                  {active ? " · locked while listening" : ""}
-                </p>
+                      {(["inworld", "assemblyai"] as const).map((p) => (
+                        <button
+                          key={p}
+                          type="button"
+                          aria-pressed={provider === p}
+                          disabled={active}
+                          onClick={() => switchProvider(p)}
+                          className={`rounded-full px-3.5 py-1 transition-colors lg:px-4 ${
+                            provider === p
+                              ? "bg-background font-medium text-foreground"
+                              : "text-muted hover:text-foreground"
+                          } ${active ? "cursor-not-allowed opacity-60" : ""}`}
+                        >
+                          {PROVIDER_LABELS[p]}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-xs text-faint lg:text-sm">
+                      Transcribing with{" "}
+                      <span className="text-muted">
+                        {PROVIDER_LABELS[provider]}
+                      </span>
+                      {active ? " · locked while listening" : ""}
+                    </p>
+                  </>
+                )}
+                {mode === "notetaker" && (
+                  <p className="text-xs text-faint lg:text-sm">
+                    Sends a Recall.ai bot into a Zoom call you&rsquo;re already in
+                  </p>
+                )}
               </header>
 
-              <div className="flex flex-col items-center gap-4">
-                <div className="relative flex items-center justify-center">
-                  <RecordOrb
-                    variant="center"
-                    running={running}
-                    starting={starting}
-                    onClick={toggleRecording}
-                    transition={swoop}
-                  />
-                </div>
-                <CenterWaveform levels={levels} active={running} />
-              </div>
+              {mode === "notetaker" ? (
+                <NotetakerPanel fade={fade} />
+              ) : (
+                <>
+                  <div className="flex flex-col items-center gap-4">
+                    <div className="relative flex items-center justify-center">
+                      <RecordOrb
+                        variant="center"
+                        running={running}
+                        starting={starting}
+                        onClick={toggleRecording}
+                        transition={swoop}
+                      />
+                    </div>
+                    <CenterWaveform levels={levels} active={running} />
+                  </div>
 
-              {/* Guidance / errors */}
-              <section
-                aria-live="polite"
-                className="flex min-h-16 w-full flex-col items-center text-center"
-              >
-                <AnimatePresence mode="wait">
-                  {sessionError ? (
-                    <motion.div key={`err-${sessionError}`} {...fade}>
-                      {sessionErrorPanel}
-                    </motion.div>
-                  ) : (
-                    <motion.div
-                      key={`hint-${mode}`}
-                      {...fade}
-                      className="flex flex-col items-center gap-2"
-                    >
-                      <p className="text-sm text-muted lg:text-base">
-                        Tap to start listening.
-                      </p>
-                      {mode === "practice" ? (
-                        <p className="text-sm text-faint lg:text-base">
-                          Try{" "}
-                          <span className="text-muted">
-                            &ldquo;Where do you see yourself in five
-                            years?&rdquo;
-                          </span>
-                        </p>
+                  {/* Guidance / errors */}
+                  <section
+                    aria-live="polite"
+                    className="flex min-h-16 w-full flex-col items-center text-center"
+                  >
+                    <AnimatePresence mode="wait">
+                      {sessionError ? (
+                        <motion.div key={`err-${sessionError}`} {...fade}>
+                          {sessionErrorPanel}
+                        </motion.div>
                       ) : (
-                        <p className="text-sm text-faint lg:text-base">
-                          Pick the meeting tab and tick &ldquo;Also share tab
-                          audio.&rdquo;
-                        </p>
+                        <motion.div
+                          key={`hint-${mode}`}
+                          {...fade}
+                          className="flex flex-col items-center gap-2"
+                        >
+                          <p className="text-sm text-muted lg:text-base">
+                            Tap to start listening.
+                          </p>
+                          {mode === "practice" ? (
+                            <p className="text-sm text-faint lg:text-base">
+                              Try{" "}
+                              <span className="text-muted">
+                                &ldquo;Where do you see yourself in five
+                                years?&rdquo;
+                              </span>
+                            </p>
+                          ) : (
+                            <p className="text-sm text-faint lg:text-base">
+                              Pick the meeting tab and tick &ldquo;Also share tab
+                              audio.&rdquo;
+                            </p>
+                          )}
+                        </motion.div>
                       )}
+                    </AnimatePresence>
+                  </section>
+
+                  {/* History persists after stopping, so it feels like memory. */}
+                  {history.length > 0 && (
+                    <motion.div {...fade} className="w-full">
+                      <HistoryPanel
+                        entries={history}
+                        reducedMotion={!!reducedMotion}
+                      />
                     </motion.div>
                   )}
-                </AnimatePresence>
-              </section>
-
-              {/* History persists after stopping, so it feels like memory. */}
-              {history.length > 0 && (
-                <motion.div {...fade} className="w-full">
-                  <HistoryPanel
-                    entries={history}
-                    reducedMotion={!!reducedMotion}
-                  />
-                </motion.div>
+                </>
               )}
             </div>
           )}
@@ -1486,7 +1525,9 @@ export default function Home() {
                 running ? "bg-accent" : starting ? "bg-muted" : "bg-faint"
               }`}
             />
-            {mode === "practice" ? "Practice" : "Live"} · {connectionLabel}
+            {mode === "notetaker"
+              ? "Notetaker"
+              : `${mode === "practice" ? "Practice" : "Live"} · ${connectionLabel}`}
           </span>
 
           {/* Centered install affordance — desktop web browsers only. The
@@ -1521,13 +1562,18 @@ export default function Home() {
                 hidden from sm up. */}
             <HowItWorksLink className="inline-flex sm:hidden" />
             <a
-              href={PROVIDER_URLS[provider]}
+              href={
+                mode === "notetaker"
+                  ? "https://recall.ai"
+                  : PROVIDER_URLS[provider]
+              }
               target="_blank"
               rel="noopener noreferrer"
               onClick={handleDesktopExternalClick}
               className="text-muted transition-colors hover:text-foreground"
             >
-              Powered by {PROVIDER_LABELS[provider]}
+              Powered by{" "}
+              {mode === "notetaker" ? "Recall.ai" : PROVIDER_LABELS[provider]}
             </a>
           </span>
         </div>
@@ -1767,4 +1813,369 @@ function SessionErrorPanel({
         />
       );
   }
+}
+
+// ---------------------------------------------------------------------------
+// Notetaker mode: sends a Recall.ai bot into a Zoom call and shows the live
+// transcript. Self-contained — it never touches the mic/tab capture pipeline.
+// ---------------------------------------------------------------------------
+
+interface NotetakerLine {
+  speaker: string | null;
+  text: string;
+  at: string;
+}
+
+interface NotetakerSessionView {
+  botId: string;
+  status: string;
+  meetingUrl: string;
+  createdAt: string;
+  updatedAt: string;
+  lines: NotetakerLine[];
+}
+
+type StatusTone = "waiting" | "active" | "neutral" | "error";
+
+/** Maps a raw Recall status code to human-facing copy. Codes are not an enum
+ *  (Recall may add more), so unknown codes fall through to a neutral state. */
+function notetakerStatusView(status: string): {
+  label: string;
+  detail: string;
+  tone: StatusTone;
+} {
+  switch (status) {
+    case "created":
+    case "joining_call":
+      return {
+        label: "Joining the call…",
+        detail: "The bot is connecting to your Zoom meeting.",
+        tone: "neutral",
+      };
+    case "in_waiting_room":
+      return {
+        label: "Waiting to be admitted",
+        detail:
+          "Admit “Kluely Notetaker” from the Zoom waiting room to start transcribing.",
+        tone: "waiting",
+      };
+    case "in_call_not_recording":
+    case "recording_permission_allowed":
+      return {
+        label: "In the call",
+        detail: "Connected — transcription is starting.",
+        tone: "active",
+      };
+    case "in_call_recording":
+      return {
+        label: "Transcribing",
+        detail: "The bot is in the call, transcribing in real time.",
+        tone: "active",
+      };
+    case "recording_permission_denied":
+      return {
+        label: "Recording not permitted",
+        detail:
+          "The host denied recording permission, so no transcript will be captured.",
+        tone: "error",
+      };
+    case "call_ended":
+    case "done":
+      return {
+        label: "Call ended",
+        detail: "The bot has left. Your transcript below is complete.",
+        tone: "neutral",
+      };
+    case "fatal":
+      return {
+        label: "The bot hit an error",
+        detail: "Something went wrong. End the session and try joining again.",
+        tone: "error",
+      };
+    default:
+      return { label: status || "Connecting…", detail: "", tone: "neutral" };
+  }
+}
+
+function NotetakerPanel({ fade }: { fade: object }) {
+  const [meetingUrl, setMeetingUrl] = useState("");
+  // Resume an existing session from localStorage. There's no auth — the client
+  // only ever knows the botId it stored, and only that session can be fetched.
+  // Safe as a lazy initializer: this panel only mounts client-side (after the
+  // user switches to Notetaker mode), so there's no SSR/hydration read of window.
+  const [botId, setBotId] = useState<string | null>(() =>
+    typeof window !== "undefined"
+      ? window.localStorage.getItem(NOTETAKER_BOT_KEY)
+      : null
+  );
+  const [joining, setJoining] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [session, setSession] = useState<NotetakerSessionView | null>(null);
+  const feedRef = useRef<HTMLDivElement>(null);
+
+  // Poll the session endpoint every 2s while a bot is active. Deliberately a
+  // plain GET (no SSE / long-lived connection) so it survives serverless limits.
+  useEffect(() => {
+    if (!botId) {
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const res = await fetch(
+          `/api/recall/session/${encodeURIComponent(botId)}`,
+          { cache: "no-store" }
+        );
+        if (cancelled || !res.ok) {
+          return;
+        }
+        setSession((await res.json()) as NotetakerSessionView);
+      } catch {
+        // Transient — the next tick retries.
+      }
+    };
+    void poll();
+    const id = window.setInterval(() => void poll(), 2000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [botId]);
+
+  // Memoized so callbacks that depend on it don't churn every render.
+  const lines = useMemo(() => session?.lines ?? [], [session]);
+
+  // Keep the transcript feed pinned to the newest line as it grows.
+  useEffect(() => {
+    const el = feedRef.current;
+    if (el) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [lines.length]);
+
+  const buildTranscript = useCallback(
+    () =>
+      lines
+        .map((line) => (line.speaker ? `${line.speaker}: ${line.text}` : line.text))
+        .join("\n"),
+    [lines]
+  );
+
+  const join = useCallback(async () => {
+    const url = meetingUrl.trim();
+    setError(null);
+    if (!url) {
+      setError("Paste your Zoom meeting link first.");
+      return;
+    }
+    setJoining(true);
+    try {
+      const res = await fetch("/api/recall/create-bot", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ meetingUrl: url }),
+      });
+      const data = (await res.json().catch(() => null)) as {
+        botId?: string;
+        error?: string;
+        recallStatus?: number;
+        recallBody?: string;
+      } | null;
+      if (!res.ok || !data?.botId) {
+        // Surface Recall's full error body when the server passed it through —
+        // its 400s name the exact field it rejected.
+        const detail = data?.recallBody
+          ? `${data.error ?? "Recall error"} (${data.recallStatus}): ${data.recallBody}`
+          : data?.error ?? "Couldn't start the bot. Check the link and try again.";
+        setError(detail);
+        return;
+      }
+      window.localStorage.setItem(NOTETAKER_BOT_KEY, data.botId);
+      setSession(null);
+      setBotId(data.botId);
+    } catch {
+      setError("Couldn't reach the server. Check your connection and try again.");
+    } finally {
+      setJoining(false);
+    }
+  }, [meetingUrl]);
+
+  const copyTranscript = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(buildTranscript());
+    } catch {
+      // Clipboard can be blocked; nothing actionable to show here.
+    }
+  }, [buildTranscript]);
+
+  const endAndDownload = useCallback(async () => {
+    // Build the .txt and trigger the download FIRST, so the user always gets the
+    // transcript even if the subsequent leave request fails.
+    const text = buildTranscript();
+    const blob = new Blob([text.length ? text : "(no transcript captured)"], {
+      type: "text/plain;charset=utf-8",
+    });
+    const href = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = href;
+    anchor.download = `kluely-transcript-${botId ?? "session"}.txt`;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(href);
+
+    // Then ask the bot to leave and reset local state back to the join form.
+    const leavingId = botId;
+    window.localStorage.removeItem(NOTETAKER_BOT_KEY);
+    setBotId(null);
+    setSession(null);
+    setMeetingUrl("");
+    if (leavingId) {
+      try {
+        await fetch("/api/recall/leave", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ botId: leavingId }),
+        });
+      } catch {
+        // The download already succeeded; a failed leave will self-resolve via
+        // the bot's automatic_leave timeouts.
+      }
+    }
+  }, [botId, buildTranscript]);
+
+  if (!botId) {
+    return (
+      <motion.div
+        {...fade}
+        className="flex w-full max-w-md flex-col gap-3"
+      >
+        <label htmlFor="notetaker-url" className="sr-only">
+          Zoom meeting link
+        </label>
+        <input
+          id="notetaker-url"
+          type="url"
+          inputMode="url"
+          autoComplete="off"
+          placeholder="https://zoom.us/j/…"
+          value={meetingUrl}
+          onChange={(event) => setMeetingUrl(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              void join();
+            }
+          }}
+          disabled={joining}
+          className="w-full rounded-full border border-line bg-surface px-4 py-2.5 text-sm text-foreground placeholder:text-faint focus-visible:border-accent focus-visible:outline-none disabled:opacity-60"
+        />
+        <button
+          type="button"
+          onClick={() => void join()}
+          disabled={joining}
+          className="w-full rounded-full border border-accent bg-accent px-4 py-2.5 text-sm font-medium text-background transition-colors hover:bg-accent/90 disabled:opacity-60"
+        >
+          {joining ? "Sending the bot…" : "Join meeting"}
+        </button>
+        {error && (
+          <p
+            role="alert"
+            className="whitespace-pre-wrap break-words rounded-lg border border-accent/40 bg-surface px-3 py-2 text-left text-xs leading-5 text-muted"
+          >
+            {error}
+          </p>
+        )}
+        <p className="text-center text-xs text-faint">
+          Start or join the Zoom call yourself, then paste its link here. The bot
+          joins as “Kluely Notetaker” — admit it from the waiting room.
+        </p>
+      </motion.div>
+    );
+  }
+
+  const view = notetakerStatusView(session?.status ?? "created");
+  const dotClass =
+    view.tone === "waiting"
+      ? "bg-accent animate-pulse"
+      : view.tone === "active"
+        ? "bg-accent"
+        : view.tone === "error"
+          ? "bg-accent"
+          : "bg-faint";
+
+  return (
+    <motion.div {...fade} className="flex w-full max-w-2xl flex-col gap-4">
+      {/* Status — surfaces the waiting-room state prominently. */}
+      <div
+        className={`flex flex-col gap-1 rounded-xl border px-4 py-3 ${
+          view.tone === "waiting"
+            ? "border-accent/60 bg-accent/5"
+            : "border-line bg-surface/40"
+        }`}
+      >
+        <div className="flex items-center gap-2">
+          <span aria-hidden="true" className={`h-2 w-2 rounded-full ${dotClass}`} />
+          <span className="text-sm font-medium text-foreground">{view.label}</span>
+        </div>
+        {view.detail && (
+          <p className="text-xs leading-5 text-muted">{view.detail}</p>
+        )}
+      </div>
+
+      {/* Live transcript feed. */}
+      <div className="flex flex-col gap-2">
+        <div className="flex items-center gap-2">
+          <StageLabel>Transcript</StageLabel>
+          {lines.length > 0 && (
+            <span className="text-[10px] tabular-nums text-faint">
+              {lines.length}
+            </span>
+          )}
+        </div>
+        <div
+          ref={feedRef}
+          aria-live="polite"
+          className="flex max-h-80 flex-col gap-2 overflow-y-auto rounded-xl border border-line bg-surface/40 px-4 py-3"
+        >
+          {lines.length === 0 ? (
+            <p className="py-6 text-center text-xs italic text-faint">
+              {view.tone === "active"
+                ? "Listening — lines appear here as people speak."
+                : "Waiting for the call to start…"}
+            </p>
+          ) : (
+            lines.map((line, i) => (
+              <p key={i} className="text-sm leading-6">
+                {line.speaker && (
+                  <span className="font-medium text-foreground">
+                    {line.speaker}:{" "}
+                  </span>
+                )}
+                <span className="text-muted">{line.text}</span>
+              </p>
+            ))
+          )}
+        </div>
+      </div>
+
+      {/* Actions. */}
+      <div className="flex flex-wrap items-center justify-center gap-3">
+        <button
+          type="button"
+          onClick={() => void copyTranscript()}
+          disabled={lines.length === 0}
+          className="rounded-full border border-line bg-surface px-4 py-2 text-xs font-medium text-foreground transition-colors hover:border-accent/70 disabled:opacity-50"
+        >
+          Copy transcript
+        </button>
+        <button
+          type="button"
+          onClick={() => void endAndDownload()}
+          className="rounded-full border border-accent bg-accent px-4 py-2 text-xs font-medium text-background transition-colors hover:bg-accent/90"
+        >
+          End &amp; download transcript
+        </button>
+      </div>
+    </motion.div>
+  );
 }

@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "recall-ai": {
+      "type": "http",
+      "url": "https://us-west-2.recall.ai/mcp"
+    }
+  }
+}

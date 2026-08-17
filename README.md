@@ -139,6 +139,112 @@ the readout is comparable across the toggle; the Gemini round trip adds
 roughly one to two seconds on top before the answer card renders. Treat
 the in-app number as the honest one — it includes your actual network.
 
+## Notetaker Mode (Recall.ai)
+
+A third mode alongside Practice and Live. Instead of capturing your mic
+or a browser tab, it sends a [Recall.ai](https://recall.ai) bot into a
+Zoom call you're already in, streams the meeting transcript back, and
+lets you copy or download it. It's designed for Vercel serverless from
+the ground up.
+
+**Flow.** You paste a Zoom link → `POST /api/recall/create-bot` validates
+it, calls Recall's Create Bot (v1.11), and stores a session in Redis
+keyed by the returned `botId` → the `botId` is saved in `localStorage`
+and the client polls `GET /api/recall/session/[botId]` every 2s → Recall
+POSTs transcript and status events to `/api/recall/webhook`, which
+appends lines and updates status in Redis. "End & download" builds the
+`.txt` client-side, then calls `POST /api/recall/leave`.
+
+**Serverless-safe by design.**
+
+- **State lives in Redis, not memory.** Serverless invocations share no
+  memory, so transcript state is kept in a Vercel Redis store over
+  `REDIS_URL` using `ioredis` (the RESP protocol, *not* the `@vercel/kv`
+  REST SDK). A single connection is cached on `globalThis` and reused
+  across warm invocations.
+- **Polling, not SSE.** The client polls a plain `GET` every 2s. No
+  server-sent events or long-lived connections, which don't survive
+  serverless function limits reliably.
+- **No auth (yet).** The client only ever knows its own `botId` and can
+  only fetch that one session. There is deliberately **no** endpoint that
+  lists sessions — that would leak transcripts between visitors. This is
+  obscurity, not security; every route carries a `SECURITY / TODO` noting
+  that real auth (binding sessions to an authenticated user) is the fix.
+- **Bot media is bundled, not fetched.** The bot shows
+  `assets/notetaker/logo.jpg` as its camera and plays
+  `assets/notetaker/intro.mp3` on join, base64-encoded into the Create
+  Bot request. Those files are force-included into the create-bot
+  serverless bundle via `outputFileTracingIncludes` in `next.config.ts`
+  (the same mechanism the answer route uses for the Klingon lexicon), so
+  they're readable at runtime on Vercel.
+
+**Two webhook shapes land at one URL.** `recording_config.realtime_endpoints`
+delivers `transcript.data` (utterances). But in the **v1.11 API, bot
+status-change events cannot be delivered via `realtime_endpoints`** —
+they come from the **account-level webhook you configure in the Recall
+dashboard** (delivered via Svix). The `/api/recall/webhook` route handles
+both payload shapes, but the "in waiting room" / "recording" status
+indicator only lights up once you point the dashboard webhook at the
+same URL:
+
+> **Recall dashboard → Webhooks → add endpoint →**
+> `https://kluelyapp.com/api/recall/webhook`, subscribed to the
+> `bot.*` status-change events.
+
+**⚠️ Most likely cause of a 400 on your first bot creation:**
+`automatic_video_output`. This code uses the nested shape the v1.11
+reference documents —
+`in_call_recording: { data: { kind: "jpeg", b64_data } }` — but some
+docs/examples show it *without* the `data` wrapper
+(`in_call_recording: { kind, b64_data }`). If Create Bot returns a 400,
+the create-bot route surfaces **Recall's full error body verbatim** in
+the response (`recallStatus` + `recallBody`) and logs it — read that to
+see exactly which field it rejected, and flip the wrapper if needed.
+Setting `DEBUG_RECALL=1` additionally logs every raw webhook payload to
+the Vercel logs.
+
+### Environment (already set in Vercel)
+
+Server-side only — `RECALL_API_KEY` must never reach the client.
+
+- `RECALL_API_KEY` — sent as the raw `Authorization` header (no `Bearer`).
+- `RECALL_REGION` — e.g. `us-west-2`, forms the API base URL
+  `https://<region>.recall.ai`.
+- `PUBLIC_BASE_URL` — public origin (e.g. `https://kluelyapp.com`), used
+  to build the webhook callback URL.
+- `REDIS_URL` — the Vercel Redis connection string (`ioredis`-compatible).
+- `DEBUG_RECALL` — set to `1` to log raw webhook payloads; unset otherwise.
+
+### Testing against the deployed site
+
+This runs in production on Vercel — there is no local tunnel, and
+webhooks must reach a public URL, so test against the live deploy:
+
+1. **Confirm env + webhook.** In Vercel, verify the five vars above are
+   set. In the Recall dashboard, confirm a webhook endpoint points at
+   `https://kluelyapp.com/api/recall/webhook` for the `bot.*` events.
+   (Optionally set `DEBUG_RECALL=1` while testing, then remove it.)
+2. **Start a Zoom call yourself** and copy its join link
+   (`https://…zoom.us/j/…`). Enable the waiting room if you want to see
+   that status.
+3. **Open** `https://kluelyapp.com`, choose **Notetaker**, paste the
+   link, and click **Join meeting**.
+4. **Watch the status.** It should move `Joining…` → **Waiting to be
+   admitted** (if a waiting room is on) → admit "Kluely Notetaker" from
+   Zoom → **Transcribing**. The bot shows the Kluely logo and plays the
+   intro clip on join.
+5. **Speak.** Lines should appear in the feed within a couple of seconds
+   (it polls every 2s). If nothing appears but status is "Transcribing",
+   check `DEBUG_RECALL` logs for the raw `transcript.data` shape.
+6. **Reload the page** mid-call — the session resumes from `localStorage`
+   and keeps polling.
+7. **Copy transcript** (clipboard) and **End & download transcript**
+   (downloads a `.txt`, then the bot leaves the call). Left alone, the
+   bot leaves on its own via `automatic_leave` (300s waiting-room
+   timeout).
+8. **On a 400 from step 3**, read the `recallBody` in the error shown in
+   the UI / Vercel logs — see the `automatic_video_output` note above.
+
 ## Limitations and tradeoffs
 
 - **The Klingon is model-generated, not verified.** Generation is
@@ -177,6 +283,11 @@ npm run dev
 - `ASSEMBLYAI_API_KEY` — from the AssemblyAI dashboard (used when the
   provider toggle is set to AssemblyAI).
 - `GEMINI_API_KEY` — from Google AI Studio.
+- `RECALL_API_KEY`, `RECALL_REGION`, `PUBLIC_BASE_URL`, `REDIS_URL` (and
+  optional `DEBUG_RECALL`) — for Notetaker Mode; see
+  [Notetaker Mode](#notetaker-mode-recallai). Note that Notetaker relies
+  on public webhooks, so it can't be exercised end-to-end from
+  `localhost` — test it against the deployed site.
 
 Open `http://localhost:3000` (localhost counts as a secure context, so
 `getUserMedia` works without HTTPS), press the button, and ask a
