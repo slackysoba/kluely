@@ -191,17 +191,22 @@ same URL:
 > `https://kluelyapp.com/api/recall/webhook`, subscribed to the
 > `bot.*` status-change events.
 
-**⚠️ Most likely cause of a 400 on your first bot creation:**
-`automatic_video_output`. This code uses the nested shape the v1.11
-reference documents —
-`in_call_recording: { data: { kind: "jpeg", b64_data } }` — but some
-docs/examples show it *without* the `data` wrapper
-(`in_call_recording: { kind, b64_data }`). If Create Bot returns a 400,
-the create-bot route surfaces **Recall's full error body verbatim** in
-the response (`recallStatus` + `recallBody`) and logs it — read that to
-see exactly which field it rejected, and flip the wrapper if needed.
-Setting `DEBUG_RECALL=1` additionally logs every raw webhook payload to
-the Vercel logs.
+**Video and audio output use different shapes — this is real, not a
+typo.** Confirmed against a live 400: `automatic_video_output` puts
+`kind` / `b64_data` **directly** on `in_call_recording` /
+`in_call_not_recording` (no `data` wrapper), while
+`automatic_audio_output` **nests** them under `data`:
+
+```jsonc
+"automatic_video_output": { "in_call_recording": { "kind": "jpeg", "b64_data": "…" } },
+"automatic_audio_output": { "in_call_recording": { "data": { "kind": "mp3", "b64_data": "…" } } }
+```
+
+If Create Bot returns a 400, the create-bot route surfaces **Recall's
+full error body verbatim** in the response (`recallStatus` +
+`recallBody`) and logs it — read that to see exactly which field it
+rejected. Setting `DEBUG_RECALL=1` additionally logs every raw webhook
+payload to the Vercel logs.
 
 ### Environment (already set in Vercel)
 

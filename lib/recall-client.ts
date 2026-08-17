@@ -115,11 +115,16 @@ export async function buildCreateBotBody(meetingUrl: string) {
     },
     // The bot shows the Kluely logo as its camera feed. Mutually exclusive with
     // output_media, so we use the automatic_* pair only.
+    //
+    // NOTE the real asymmetry, confirmed against a live 400: video output puts
+    // kind/b64_data DIRECTLY on in_call_recording / in_call_not_recording (no
+    // "data" wrapper), whereas audio output nests them under "data" (below).
     automatic_video_output: {
-      in_call_recording: { data: { kind: "jpeg", b64_data: logoB64 } },
-      in_call_not_recording: { data: { kind: "jpeg", b64_data: logoB64 } },
+      in_call_recording: { kind: "jpeg", b64_data: logoB64 },
+      in_call_not_recording: { kind: "jpeg", b64_data: logoB64 },
     },
-    // The bot plays a short intro clip once it's in the call.
+    // The bot plays a short intro clip once it's in the call. Audio DOES use the
+    // "data" wrapper (unlike video above).
     automatic_audio_output: {
       in_call_recording: { data: { kind: "mp3", b64_data: introB64 } },
     },
