@@ -17,14 +17,44 @@
 //             {"message_type":"committed_transcript_with_timestamps", ...}
 //             {"message_type":"<error-name>", ...}  (see handleMessage)
 //
-// final_transcript (not committed_transcript) drives onFinalTranscript: it's
-// already immutable and arrives before the ~1.5s VAD silence window elapses,
-// so waiting for the commit would add that latency to the Gemini pipeline.
+// committed_transcript drives onFinalTranscript. This reverses an earlier
+// assumption that final_transcript — arriving ahead of the ~1.5s VAD silence
+// window — was the immutable signal to use, on the theory that waiting for
+// the commit would needlessly add that latency to the Gemini pipeline. In
+// practice, under commit_strategy=vad, final_transcript never arrives at all:
+// confirmed both by a live wire capture (only session_started/partial/
+// committed ever showed up) and by ElevenLabs' own SDK, whose Scribe realtime
+// event list has no final_transcript variant — only session_started,
+// partial_transcript, committed_transcript, and the timestamped forms. So the
+// original design silently dropped every finalized turn. A working answer
+// ~1.5s later beats a pipeline that never fires. final_transcript is still
+// wired below (harmless if ElevenLabs ever does emit it, e.g. in some other
+// commit-strategy configuration), guarded so it can't double-fire
+// onFinalTranscript for the same turn if committed_transcript also arrives.
 //
 // Error events arrive as a message immediately before the server closes the
 // socket, so they're handled in onmessage; handleClose suppresses its own
 // "closed unexpectedly" report once an error message has already surfaced
 // one, to avoid reporting the same failure twice.
+//
+// Latency metrics, confirmed from a live committed_transcript_with_timestamps
+// payload (do not re-derive): word timing lives in a `words` array of
+// `{ text, start, end, type, ... }`, where `start`/`end` are seconds elapsed
+// since session start (not ms, not utterance-relative), and `type` is either
+// "word" or "spacing" — spacing entries are filtered out before use. Like the
+// committed-vs-final text signal, timestamps only ever arrive on
+// committed_transcript_with_timestamps; final_transcript_with_timestamps
+// doesn't fire under commit_strategy=vad, same root cause as above.
+//
+// Unlike Inworld, which streams incrementally-growing word arrays on every
+// partial (so each word's individual appearance latency is measurable),
+// ElevenLabs delivers the whole utterance's word timing in one batch, once,
+// at commit time — every word in it became visible to us at the same
+// instant. So there's no way to measure "how fast did word N appear" per
+// word; both word-emission and turn-detection latency below are computed the
+// same way, from the last word's `end` to the receipt of that one message.
+// They'll report near-identical numbers for this provider — an honest
+// reflection of what the wire protocol actually exposes, not a bug.
 
 import type {
   SessionState,
@@ -45,6 +75,7 @@ const VAD_THRESHOLD = 0.5;
 const VAD_SILENCE_THRESHOLD_SECS = 1.5;
 const MIN_SPEECH_DURATION_MS = 100;
 const MIN_SILENCE_DURATION_MS = 100;
+const SAMPLE_RATE = 16000;
 // Do NOT add filter_background_audio — it's incompatible with
 // include_timestamps and the socket will reject the connection.
 
@@ -53,6 +84,13 @@ const MIN_SILENCE_DURATION_MS = 100;
 const HIDDEN_TAB_TERMINATE_MS = 30_000;
 const OPEN_TIMEOUT_MS = 10_000;
 const CLOSE_TIMEOUT_MS = 5_000;
+
+// Latency measurement — kept identical to lib/inworld-stream.ts so the two
+// providers feed the same metrics with the same semantics.
+const BYTES_PER_SAMPLE = 2; // 16-bit mono PCM ⇒ 2 bytes per sample.
+const LATENCY_WINDOW = 50; // rolling window of per-word latency samples.
+const MAX_PLAUSIBLE_LATENCY_MS = 5_000; // above this is a stale anchor, not real.
+const MAX_PLAUSIBLE_TURN_MS = 10_000; // turn detection includes the endpoint wait.
 
 // Error message_types that mean the account/session is out of capacity, as
 // opposed to a malformed request.
@@ -93,10 +131,34 @@ export type ElevenLabsStreamCallbacks = TranscriptionCallbacks;
 const DEBUG_ELEVENLABS =
   process.env.NEXT_PUBLIC_DEBUG_ELEVENLABS === "1";
 
+interface ElevenLabsWord {
+  text: string;
+  /** Seconds elapsed since session start (not ms, not utterance-relative). */
+  start: number;
+  /** Seconds elapsed since session start. */
+  end: number;
+  /** "word" for actual words; "spacing" (and possibly others) for gaps. */
+  type: string;
+}
+
 interface ElevenLabsServerMessage {
   message_type: string;
   text?: string;
   session_id?: string;
+  /** Present only on final_transcript_with_timestamps / committed_transcript_with_timestamps. */
+  words?: ElevenLabsWord[];
+}
+
+/** Rounded median (p50) of a sample window, or null when it's empty. */
+function median(samples: number[]): number | null {
+  const n = samples.length;
+  if (n === 0) {
+    return null;
+  }
+  const sorted = [...samples].sort((a, b) => a - b);
+  const mid = Math.floor(n / 2);
+  const value = n % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+  return Math.round(value);
 }
 
 /** Encodes raw PCM bytes as base64 for the `audio_base_64` field. */
@@ -149,6 +211,10 @@ export class ElevenLabsStream implements TranscriptionProvider {
   private sessionId: string | null = null;
   private sessionEnded = false;
   private errorAlreadyReported = false;
+  // Guards against firing onFinalTranscript twice for the same turn if both
+  // final_transcript and committed_transcript arrive for it. Reset whenever a
+  // new partial_transcript comes in, since that means a new turn has started.
+  private turnFinalized = false;
   private pendingOpen: {
     resolve: () => void;
     reject: (err: Error) => void;
@@ -156,6 +222,13 @@ export class ElevenLabsStream implements TranscriptionProvider {
   private onClosed: (() => void) | null = null;
   private hiddenTimer: number | null = null;
   private listenersAttached = false;
+  // Latency measurement: anchor audio-stream time 0 to the wall clock, then
+  // for the final word in each commit compare (message received) − (audio
+  // sent) and report a rolling median — see the header comment for why this
+  // provider's word-emission and turn-detection metrics share one formula.
+  private audioClockBase: number | null = null;
+  private latencySamples: number[] = [];
+  private turnLatencySamples: number[] = [];
 
   constructor(callbacks: TranscriptionCallbacks = {}) {
     this.callbacks = callbacks;
@@ -169,14 +242,14 @@ export class ElevenLabsStream implements TranscriptionProvider {
     return this.sessionId;
   }
 
-  // TODO(next step): latency metrics via final_transcript_with_timestamps /
-  // committed_transcript_with_timestamps.
+  /** Rolling median (p50) word-emission latency in ms, or null before any word. */
   get wordEmissionP50Ms(): number | null {
-    return null;
+    return median(this.latencySamples);
   }
 
+  /** Rolling median (p50) turn-detection latency in ms, or null before any turn. */
   get turnDetectionP50Ms(): number | null {
-    return null;
+    return median(this.turnLatencySamples);
   }
 
   /** Fetches a fresh single-use token, opens the socket, and resolves once the session has begun. */
@@ -187,7 +260,11 @@ export class ElevenLabsStream implements TranscriptionProvider {
     this.state = "connecting";
     this.sessionId = null;
     this.sessionEnded = false;
+    this.turnFinalized = false;
     this.errorAlreadyReported = false;
+    this.audioClockBase = null;
+    this.latencySamples = [];
+    this.turnLatencySamples = [];
 
     // The token is single-use (consumed on first use) and expires in 15
     // minutes, so it's minted here and never cached across sessions.
@@ -268,6 +345,14 @@ export class ElevenLabsStream implements TranscriptionProvider {
         audio_base_64: arrayBufferToBase64(chunk),
       })
     );
+    // Anchor stream time 0 to the wall clock on the first chunk, so a word's
+    // `end` (seconds since session start) can be mapped back to the moment
+    // its audio was sent.
+    if (this.audioClockBase === null) {
+      const chunkMs =
+        (chunk.byteLength / BYTES_PER_SAMPLE / SAMPLE_RATE) * 1000;
+      this.audioClockBase = performance.now() - chunkMs;
+    }
   }
 
   /**
@@ -355,29 +440,102 @@ export class ElevenLabsStream implements TranscriptionProvider {
             message
           );
         }
+        // A new partial means a fresh turn is underway.
+        this.turnFinalized = false;
         break;
       }
       case "final_transcript": {
-        if (typeof message.text === "string") {
-          this.callbacks.onFinalTranscript?.({ transcript: message.text });
-        } else {
-          console.warn(
-            "[elevenlabs-stream] final_transcript missing string `text`",
-            message
-          );
-        }
+        // Not observed in practice under commit_strategy=vad (see the header
+        // comment), but handled defensively in case it ever does arrive.
+        this.finalizeTurn(message);
         break;
       }
       case "committed_transcript":
-        // Ignored for text: final_transcript already delivered this turn's
-        // text, ahead of the commit. This is only a durability signal.
+        // The actual finalization signal under commit_strategy=vad.
+        this.finalizeTurn(message);
         break;
       case "final_transcript_with_timestamps":
       case "committed_transcript_with_timestamps":
-        // TODO(next step): latency metrics. (Logged above when DEBUG_ELEVENLABS.)
+        this.recordLatency(message);
         break;
       default:
         break;
+    }
+  }
+
+  /** Fires onFinalTranscript at most once per turn, from whichever of
+   * final_transcript / committed_transcript actually carries the text. */
+  private finalizeTurn(message: ElevenLabsServerMessage): void {
+    if (this.turnFinalized) {
+      return;
+    }
+    if (typeof message.text !== "string") {
+      console.warn(
+        `[elevenlabs-stream] ${message.message_type} missing string \`text\``,
+        message
+      );
+      return;
+    }
+    this.turnFinalized = true;
+    this.callbacks.onFinalTranscript?.({ transcript: message.text });
+  }
+
+  /**
+   * Computes latency from the last real word's `end` (seconds since session
+   * start, converted to ms) to the receipt of this *_with_timestamps message,
+   * and records it as both the word-emission and turn-detection sample — see
+   * the header comment for why both metrics collapse to the same formula for
+   * this provider, unlike Inworld's per-word incremental measurement.
+   */
+  private recordLatency(message: ElevenLabsServerMessage): void {
+    if (this.audioClockBase === null) {
+      return;
+    }
+    const words = (message.words ?? []).filter((w) => w.type === "word");
+    if (words.length === 0) {
+      return;
+    }
+    const lastWord = words[words.length - 1];
+    const receivedAt = performance.now();
+    // audioClockBase + (end * 1000) is the wall-clock moment speech stopped.
+    const speechEndAt = this.audioClockBase + lastWord.end * 1000;
+    const latency = receivedAt - speechEndAt;
+
+    if (latency >= 0 && latency < MAX_PLAUSIBLE_LATENCY_MS) {
+      this.pushWordLatencySample(latency);
+    }
+    if (latency >= 0 && latency < MAX_PLAUSIBLE_TURN_MS) {
+      this.pushTurnLatencySample(latency);
+    }
+
+    if (DEBUG_ELEVENLABS) {
+      console.log(`[elevenlabs-debug] ${message.message_type} latency`, {
+        latencyMs: Math.round(latency),
+        wordEmissionP50Ms: this.wordEmissionP50Ms,
+        turnDetectionP50Ms: this.turnDetectionP50Ms,
+      });
+    }
+  }
+
+  private pushWordLatencySample(ms: number): void {
+    this.latencySamples.push(ms);
+    if (this.latencySamples.length > LATENCY_WINDOW) {
+      this.latencySamples.shift();
+    }
+    const p50 = median(this.latencySamples);
+    if (p50 !== null) {
+      this.callbacks.onWordEmissionLatency?.(p50);
+    }
+  }
+
+  private pushTurnLatencySample(ms: number): void {
+    this.turnLatencySamples.push(ms);
+    if (this.turnLatencySamples.length > LATENCY_WINDOW) {
+      this.turnLatencySamples.shift();
+    }
+    const p50 = median(this.turnLatencySamples);
+    if (p50 !== null) {
+      this.callbacks.onTurnDetectionLatency?.(p50);
     }
   }
 
