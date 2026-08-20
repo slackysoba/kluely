@@ -89,6 +89,11 @@ async function loadMedia(): Promise<{ logoB64: string; introB64: string }> {
  */
 export async function buildCreateBotBody(meetingUrl: string) {
   const { logoB64, introB64 } = await loadMedia();
+  // TODO: On Google Meet the bot joins as an anonymous guest, so a human has to
+  // manually admit it every time. Recall's signed-in-bot flow (authenticating
+  // the bot against a Google account) would let it join as a signed-in user and
+  // remove that manual-admission requirement. Not wired up — the bot is
+  // anonymous on every platform today.
   return {
     meeting_url: meetingUrl,
     bot_name: "Kluely Notetaker",

@@ -778,8 +778,8 @@ export default function Home() {
   const validationSamplesRef = useRef<number[]>([]);
 
   const [mode, setMode] = useState<CaptureMode>("practice");
-  // Inworld is the default transcription backend; AssemblyAI is the fallback.
-  const [provider, setProvider] = useState<Provider>("inworld");
+  // AssemblyAI is the default transcription backend.
+  const [provider, setProvider] = useState<Provider>("assemblyai");
   const [running, setRunning] = useState(false);
   const [starting, setStarting] = useState(false);
   const [currentQuestion, setCurrentQuestion] = useState("");
@@ -1412,7 +1412,7 @@ export default function Home() {
                       role="group"
                       aria-label="Transcription provider"
                     >
-                      {(["inworld", "assemblyai", "elevenlabs"] as const).map((p) => (
+                      {(["assemblyai", "elevenlabs", "inworld"] as const).map((p) => (
                         <button
                           key={p}
                           type="button"
@@ -1832,10 +1832,20 @@ interface NotetakerLine {
   at: string;
 }
 
+// Which conferencing platform the bot joined. Mirrors NotetakerPlatform on the
+// server; kept as its own type so this client file doesn't import server code.
+type NotetakerPlatformView = "zoom" | "google_meet";
+
+const NOTETAKER_PLATFORM_LABELS: Record<NotetakerPlatformView, string> = {
+  zoom: "Zoom",
+  google_meet: "Google Meet",
+};
+
 interface NotetakerSessionView {
   botId: string;
   status: string;
   meetingUrl: string;
+  platform: NotetakerPlatformView;
   createdAt: string;
   updatedAt: string;
   lines: NotetakerLine[];
@@ -1971,7 +1981,7 @@ function NotetakerPanel({ fade }: { fade: object }) {
     const url = meetingUrl.trim();
     setError(null);
     if (!url) {
-      setError("Paste your Zoom meeting link first.");
+      setError("Paste your Zoom or Google Meet link first.");
       return;
     }
     setJoining(true);
@@ -2057,14 +2067,14 @@ function NotetakerPanel({ fade }: { fade: object }) {
         className="flex w-full max-w-md flex-col gap-3"
       >
         <label htmlFor="notetaker-url" className="sr-only">
-          Zoom meeting link
+          Zoom or Google Meet link
         </label>
         <input
           id="notetaker-url"
           type="url"
           inputMode="url"
           autoComplete="off"
-          placeholder="https://zoom.us/j/…"
+          placeholder="https://zoom.us/j/…  or  meet.google.com/…"
           value={meetingUrl}
           onChange={(event) => setMeetingUrl(event.target.value)}
           onKeyDown={(event) => {
@@ -2092,14 +2102,17 @@ function NotetakerPanel({ fade }: { fade: object }) {
           </p>
         )}
         <p className="text-center text-xs text-faint">
-          Start or join the Zoom call yourself, then paste its link here. The bot
-          joins as “Kluely Notetaker” — admit it from the waiting room.
+          Start or join the Zoom or Google Meet call yourself, then paste its
+          link here. The bot joins as “Kluely Notetaker” — admit it from the
+          waiting room. Google Meet bots always join as anonymous guests and
+          must be manually admitted.
         </p>
       </motion.div>
     );
   }
 
   const view = notetakerStatusView(session?.status ?? "created");
+  const platform = session?.platform ?? null;
   const dotClass =
     view.tone === "waiting"
       ? "bg-accent animate-pulse"
@@ -2122,9 +2135,20 @@ function NotetakerPanel({ fade }: { fade: object }) {
         <div className="flex items-center gap-2">
           <span aria-hidden="true" className={`h-2 w-2 rounded-full ${dotClass}`} />
           <span className="text-sm font-medium text-foreground">{view.label}</span>
+          {platform && (
+            <span className="ml-auto text-[10px] uppercase tracking-[0.14em] text-faint">
+              {NOTETAKER_PLATFORM_LABELS[platform]}
+            </span>
+          )}
         </div>
         {view.detail && (
           <p className="text-xs leading-5 text-muted">{view.detail}</p>
+        )}
+        {platform === "google_meet" && (
+          <p className="text-xs leading-5 text-muted">
+            Google Meet bots always join as anonymous guests and must be
+            manually admitted.
+          </p>
         )}
       </div>
 

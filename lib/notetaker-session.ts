@@ -3,7 +3,7 @@
 // and writes here rather than any in-process Map.
 //
 // Data model per bot:
-//   notetaker:<botId>        HASH  { status, meetingUrl, createdAt, updatedAt }
+//   notetaker:<botId>        HASH  { status, meetingUrl, platform, createdAt, updatedAt }
 //   notetaker:<botId>:lines  LIST  JSON-encoded TranscriptLine, appended in order
 //
 // Both keys carry a TTL so transcripts don't linger forever — this is a demo
@@ -21,11 +21,16 @@ export interface TranscriptLine {
   at: string;
 }
 
+/** Which conferencing platform the meeting URL points at. Recall drives both
+ *  with the same API — this is only carried so the UI can label the session. */
+export type NotetakerPlatform = "zoom" | "google_meet";
+
 export interface NotetakerSession {
   botId: string;
   /** Latest Recall bot status code, e.g. "in_waiting_room", "in_call_recording". */
   status: string;
   meetingUrl: string;
+  platform: NotetakerPlatform;
   createdAt: string;
   updatedAt: string;
   lines: TranscriptLine[];
@@ -42,7 +47,8 @@ function linesKey(botId: string): string {
 /** Records a freshly-created bot so the session GET has something to return. */
 export async function createSession(
   botId: string,
-  meetingUrl: string
+  meetingUrl: string,
+  platform: NotetakerPlatform
 ): Promise<void> {
   const redis = getRedis();
   const now = new Date().toISOString();
@@ -51,6 +57,7 @@ export async function createSession(
     .hset(hashKey(botId), {
       status: "created",
       meetingUrl,
+      platform,
       createdAt: now,
       updatedAt: now,
     })
@@ -117,6 +124,9 @@ export async function getSession(
     botId,
     status: hash.status ?? "unknown",
     meetingUrl: hash.meetingUrl ?? "",
+    // Sessions created before platform tracking (or with an unexpected value)
+    // fall back to "zoom" — historically the only supported platform.
+    platform: hash.platform === "google_meet" ? "google_meet" : "zoom",
     createdAt: hash.createdAt ?? "",
     updatedAt: hash.updatedAt ?? "",
     lines,
