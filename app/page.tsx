@@ -19,6 +19,7 @@ import {
   SessionCapacityError,
 } from "@/lib/assemblyai-stream";
 import { InworldStream } from "@/lib/inworld-stream";
+import { ElevenLabsStream } from "@/lib/elevenlabs-stream";
 import type {
   TranscriptionCallbacks,
   TranscriptionProvider,
@@ -259,20 +260,22 @@ type CaptureMode = "practice" | "live" | "notetaker";
 // notetaker session (there is no auth/login — the client only knows its own id).
 const NOTETAKER_BOT_KEY = "kluely:notetaker:botId";
 
-// Which streaming transcription backend feeds the pipeline. Both clients
-// implement TranscriptionProvider, so the choice is purely which class we
-// instantiate — nothing downstream branches on it.
-type Provider = "inworld" | "assemblyai";
+// Which streaming transcription backend feeds the pipeline. All three
+// clients implement TranscriptionProvider, so the choice is purely which
+// class we instantiate — nothing downstream branches on it.
+type Provider = "inworld" | "assemblyai" | "elevenlabs";
 
 const PROVIDER_LABELS: Record<Provider, string> = {
   inworld: "Inworld",
   assemblyai: "AssemblyAI",
+  elevenlabs: "ElevenLabs",
 };
 
 // Home page for the active provider, used by the footer credit.
 const PROVIDER_URLS: Record<Provider, string> = {
   inworld: "https://inworld.ai",
   assemblyai: "https://www.assemblyai.com",
+  elevenlabs: "https://elevenlabs.io",
 };
 
 type SessionErrorKind =
@@ -1016,7 +1019,9 @@ export default function Home() {
     const stream: TranscriptionProvider =
       provider === "inworld"
         ? new InworldStream(callbacks)
-        : new AssemblyAIStream(callbacks);
+        : provider === "elevenlabs"
+          ? new ElevenLabsStream(callbacks)
+          : new AssemblyAIStream(callbacks);
     const capture = new AudioCapture();
     streamRef.current = stream;
     captureRef.current = capture;
@@ -1407,7 +1412,7 @@ export default function Home() {
                       role="group"
                       aria-label="Transcription provider"
                     >
-                      {(["inworld", "assemblyai"] as const).map((p) => (
+                      {(["inworld", "assemblyai", "elevenlabs"] as const).map((p) => (
                         <button
                           key={p}
                           type="button"
